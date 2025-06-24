@@ -1,0 +1,4 @@
+User-agent: *                 ← Applies to all search engine crawlers
+Allow: /                      ← Allows crawling of all pages
+Sitemap: https://thesoulchain.xyz/sitemap.xml  ← Points crawlers to your sitemap
+
