@@ -73,12 +73,14 @@ export default defineConfig(async () => {
       global: 'window',
     },
     optimizeDeps: {
-      include: ['buffer'],
+      include: ['buffer', 'react', 'react-dom'],
+      force: true
     },
     resolve: {
       alias: {
         buffer: 'buffer',
       },
+      dedupe: ['react', 'react-dom']
     },
     server: {
       host: true,
@@ -90,4 +92,3 @@ export default defineConfig(async () => {
     }
   }
 })
-
