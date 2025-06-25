@@ -23,8 +23,8 @@
     "@walletconnect/modal": "^2.6.2",
     "ethers": "^5.8.0",
     "lucide-react": "^0.344.0",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "react-helmet-async": "^2.0.5",
     "react-router-dom": "^7.6.2",
     "react-router-hash-link": "^2.4.3",
@@ -57,5 +57,13 @@
     "vite": "^5.4.2",
     "vite-plugin-compression": "^0.5.1",
     "vite-plugin-image-optimizer": "^1.1.9"
+  },
+  "resolutions": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "overrides": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
   }
 }
