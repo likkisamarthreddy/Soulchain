@@ -140,22 +140,7 @@ export default defineConfig(async () => {
       }
     },
     define: {
-
-      'process.env': {},
-      global: 'window',
-    },
-    optimizeDeps: {
-      include: ['buffer', 'react', 'react-dom'],
-      force: true
-    },
-    resolve: {
-      alias: {
-        buffer: 'buffer',
-      },
-      dedupe: ['react', 'react-dom']
-
       'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV || 'development')
-
     },
     server: {
       host: true,
@@ -169,10 +154,5 @@ export default defineConfig(async () => {
       port: 4173,
       strictPort: true
     }
-
-  }
-})
-
   };
 });
-
