@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+<<<<<<< HEAD
 import path from 'path';
 
 export default defineConfig({
@@ -8,10 +9,19 @@ export default defineConfig({
       jsxRuntime: 'automatic'
     })
   ],
+=======
+
+export default defineConfig({
+  plugins: [react()],
+  define: {
+    global: 'globalThis',
+  },
+>>>>>>> 1d71894 (Fix icon import and update build dependencies)
   resolve: {
     alias: {
       buffer: 'buffer',
       process: 'process/browser',
+<<<<<<< HEAD
       '@': path.resolve(__dirname, './src')
     },
     dedupe: ['react', 'react-dom', 'wagmi', 'viem']
@@ -62,4 +72,11 @@ export default defineConfig({
     port: 4173,
     strictPort: true
   }
+=======
+    },
+  },
+  optimizeDeps: {
+    include: ['buffer', 'process'],
+  },
+>>>>>>> 1d71894 (Fix icon import and update build dependencies)
 });
