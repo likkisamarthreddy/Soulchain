@@ -22,9 +22,10 @@ export default defineConfig({
   },
   optimizeDeps: {
     include: [
-      'react', 
-      'react-dom', 
+      'react',
+      'react-dom',
       'react-router-dom',
+      'ethers',
       'lucide-react',
       '@tanstack/react-query',
       'buffer',
@@ -44,14 +45,17 @@ export default defineConfig({
     sourcemap: false,
     chunkSizeWarningLimit: 500,
     rollupOptions: {
-      external: ['ethers'],
+      // Removed 'ethers' from external array
+      external: [],
       output: {
         manualChunks: {
           'vendor-react': ['react', 'react-dom', 'react-router-dom'],
           'vendor-ui': ['lucide-react'],
           'vendor-web3-core': ['wagmi', 'viem'],
           'vendor-web3-modal': ['@reown/appkit-wagmi'],
-          'vendor-query': ['@tanstack/react-query']
+          'vendor-query': ['@tanstack/react-query'],
+          // Add ethers to its own chunk
+          'vendor-ethers': ['ethers']
         }
       }
     }
@@ -66,4 +70,3 @@ export default defineConfig({
     strictPort: true
   }
 });
-
