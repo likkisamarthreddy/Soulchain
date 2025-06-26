@@ -140,7 +140,7 @@ export default defineConfig(async () => {
       }
     },
     define: {
-<<<<<<< HEAD
+
       'process.env': {},
       global: 'window',
     },
@@ -153,9 +153,9 @@ export default defineConfig(async () => {
         buffer: 'buffer',
       },
       dedupe: ['react', 'react-dom']
-=======
+
       'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV || 'development')
->>>>>>> 0154501 (Apply latest SoulChain frontend updates)
+
     },
     server: {
       host: true,
@@ -169,10 +169,10 @@ export default defineConfig(async () => {
       port: 4173,
       strictPort: true
     }
-<<<<<<< HEAD
+
   }
 })
-=======
+
   };
 });
->>>>>>> 0154501 (Apply latest SoulChain frontend updates)
+
