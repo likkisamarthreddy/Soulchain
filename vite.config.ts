@@ -1,74 +1,146 @@
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
-import { visualizer } from 'rollup-plugin-visualizer'
-import { ViteImageOptimizer } from 'vite-plugin-image-optimizer'
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+import path from 'path';
+import { visualizer } from 'rollup-plugin-visualizer';
+import { ViteImageOptimizer } from 'vite-plugin-image-optimizer';
+import rollupNodePolyFill from 'rollup-plugin-node-polyfills';
+import { NodeGlobalsPolyfillPlugin } from '@esbuild-plugins/node-globals-polyfill';
 
 export default defineConfig(async () => {
-  const tailwindcss = (await import('tailwindcss')).default
-  const autoprefixer = (await import('autoprefixer')).default
+  const tailwindcss = (await import('tailwindcss')).default;
+  const autoprefixer = (await import('autoprefixer')).default;
 
   return {
     plugins: [
       react({
+        jsxRuntime: 'automatic',
         babel: {
           plugins: [
-            '@emotion/babel-plugin',
+            // Remove emotion plugin if not used
+            // '@emotion/babel-plugin',
             ['babel-plugin-direct-import', { modules: ['lucide-react'] }]
           ]
         }
       }),
       ViteImageOptimizer({
-        jpg: { quality: 80 },
-        png: { quality: 80 },
-        webp: { lossless: false, quality: 85 },
+        jpg: { quality: 75 }, // Reduced from 80
+        png: { quality: 75 }, // Reduced from 80
+        webp: { quality: 80, lossless: false }, // Reduced from 85
+        avif: { quality: 70 }, // Added AVIF support
+        svgo: {
+          plugins: [
+            { name: 'preset-default' },
+            { name: 'removeViewBox', active: false }, // Keep viewBox for responsive SVGs
+            { name: 'cleanupIds' },
+            { name: 'minifyStyles' }
+          ]
+        }
       }),
-      visualizer({
+      // Only generate bundle stats in production
+      process.env.NODE_ENV === 'production' && visualizer({
         filename: 'dist/bundle-stats.html',
         gzipSize: true,
         brotliSize: true,
-      }),
-    ],
+        open: false // Don't auto-open
+      })
+    ].filter(Boolean),
+    resolve: {
+      alias: {
+        buffer: 'buffer',
+        process: 'process/browser',
+        '@': path.resolve(__dirname, './src')
+      },
+      dedupe: ['react', 'react-dom', 'wagmi', 'viem'] // Added more deduplication
+    },
+    optimizeDeps: {
+      include: [
+        'react', 
+        'react-dom', 
+        'react-router-dom',
+        'lucide-react',
+        '@tanstack/react-query'
+      ],
+      exclude: ['@reown/appkit-wagmi'], // Exclude large deps from pre-bundling
+      esbuildOptions: {
+        define: {
+          global: 'globalThis'
+        },
+        plugins: [
+          NodeGlobalsPolyfillPlugin({
+            buffer: true,
+            process: true
+          })
+        ]
+      }
+    },
     build: {
-      target: 'esnext',
+      target: 'es2020', // Changed from esnext for better compatibility
       minify: 'terser',
       cssCodeSplit: true,
-      sourcemap: process.env.NODE_ENV === 'development',
-      chunkSizeWarningLimit: 1000,
+      sourcemap: false, // Disable in production for smaller bundles
+      chunkSizeWarningLimit: 500, // Reduced from 1000
       rollupOptions: {
+        plugins: [rollupNodePolyFill()],
         output: {
-          manualChunks(id) {
-            if (id.includes('node_modules')) {
-              if (id.includes('react')) return 'vendor_react'
-              if (id.includes('lucide')) return 'vendor_icons'
-              if (id.includes('framer-motion')) return 'vendor_animations'
-              return 'vendor'
-            }
+          // More aggressive code splitting
+          manualChunks: {
+            // Core React chunk
+            'vendor-react': ['react', 'react-dom', 'react-router-dom'],
+            
+            // UI components
+            'vendor-ui': ['lucide-react'],
+            
+            // Web3 related (largest chunk)
+            'vendor-web3-core': ['wagmi', 'viem'],
+            'vendor-web3-modal': ['@reown/appkit-wagmi'],
+            
+            // Query client
+            'vendor-query': ['@tanstack/react-query'],
+            
+            // Helmet
+            'vendor-helmet': ['react-helmet-async']
           },
-          assetFileNames: 'assets/[name]-[hash][extname]',
-          entryFileNames: 'assets/[name]-[hash].js',
-          chunkFileNames: 'assets/[name]-[hash].js',
+          // Optimize asset naming
+          assetFileNames: (assetInfo) => {
+            const info = assetInfo.name?.split('.') || [];
+            const ext = info[info.length - 1];
+            if (/\.(png|jpe?g|webp|avif|svg|gif|tiff|bmp|ico)$/i.test(assetInfo.name || '')) {
+              return `assets/images/[name]-[hash][extname]`;
+            }
+            if (ext === 'css') {
+              return `assets/css/[name]-[hash][extname]`;
+            }
+            return `assets/[name]-[hash][extname]`;
+          },
+          entryFileNames: 'assets/js/[name]-[hash].js',
+          chunkFileNames: 'assets/js/[name]-[hash].js'
         }
       },
       terserOptions: {
         compress: {
           drop_console: true,
           drop_debugger: true,
-          pure_funcs: ['console.log']
+          pure_funcs: ['console.log', 'console.info', 'console.warn'],
+          passes: 2 // Multiple compression passes
         },
         format: {
           comments: false
+        },
+        mangle: {
+          safari10: true
         }
       }
     },
     css: {
-      modules: {
-        localsConvention: 'camelCaseOnly'
-      },
       postcss: {
         plugins: [tailwindcss, autoprefixer]
+      },
+      modules: {
+        localsConvention: 'camelCaseOnly'
       }
     },
     define: {
+<<<<<<< HEAD
       'process.env': {},
       global: 'window',
     },
@@ -81,14 +153,26 @@ export default defineConfig(async () => {
         buffer: 'buffer',
       },
       dedupe: ['react', 'react-dom']
+=======
+      'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV || 'development')
+>>>>>>> 0154501 (Apply latest SoulChain frontend updates)
     },
     server: {
       host: true,
       port: 4173,
       strictPort: true,
       hmr: {
-        clientPort: 4173,
-      },
+        clientPort: 4173
+      }
+    },
+    preview: {
+      port: 4173,
+      strictPort: true
     }
+<<<<<<< HEAD
   }
 })
+=======
+  };
+});
+>>>>>>> 0154501 (Apply latest SoulChain frontend updates)

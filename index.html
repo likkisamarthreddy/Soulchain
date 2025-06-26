@@ -13,7 +13,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     
     <!-- Critical Resource Preloads (only preload what's immediately needed) -->
-    <link rel="preload" href="/fonts/inter.woff2" as="font" type="font/woff2" crossorigin>
+   <!-- <link rel="preload" href="/fonts/inter.woff2" as="font" type="font/woff2" crossorigin> -->
     <link rel="preload" href="/src/main.tsx" as="script">
     
     <!-- Load fonts directly instead of preloading -->
@@ -22,7 +22,7 @@
     <!-- Open Graph -->
     <meta property="og:title" content="SoulChain | Emotional Blockchain Presale 2025" />
     <meta property="og:description" content="Join the SoulChain presale — the world's first emotional blockchain on Solana." />
-    <meta property="og:image" content="/og-image.webp" />
+    <meta property="og:image" content="/og-image.png" />
     <meta property="og:url" content="https://thesoulchain.xyz" />
     <meta property="og:type" content="website" />
     
@@ -30,7 +30,7 @@
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="SoulChain | The Human Archive of Emotions on the Blockchain" />
     <meta name="twitter:description" content="Join the SoulChain presale — a Web3 movement to preserve emotions on-chain forever." />
-    <meta name="twitter:image" content="/og-image.webp" />
+    <meta name="twitter:image" content="/og-image.png" />
     
     <!-- Icons -->
     <link rel="icon" type="image/png" href="/favicon-96x96.png" sizes="96x96" />
@@ -49,7 +49,7 @@
      // Preload OG image only after initial page load if needed
       window.addEventListener('load', () => {
         const ogImage = new Image();
-        ogImage.src = '/og-image.webp';
+        ogImage.src = '/og-image.png';
       });
     </script>
   </body>
