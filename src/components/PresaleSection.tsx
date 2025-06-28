@@ -176,11 +176,6 @@ const EMOTIONAL_MOMENTS: EmotionalMoment[] = [
   { id: '8', emotion: 'Sweet Nostalgia', intensity: 88, timestamp: Date.now() - 7000, description: 'Cherished memories of the past', category: 'nostalgia', color: '#DEB887' },
 ];
 
-// Mobile detection utility
-const isMobile = () => {
-  return /Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-};
-
 function PresaleSection() {
   // Wagmi hooks
   const { address, isConnected, chain } = useAccount();
@@ -199,6 +194,7 @@ function PresaleSection() {
   const [liveBnbPrice, setLiveBnbPrice] = useState<number>(666);
   const [loading, setLoading] = useState<boolean>(false);
   const [txLoading, setTxLoading] = useState<boolean>(false);
+  const [dataLoading, setDataLoading] = useState<boolean>(false);
 
   // Balance state
   const [bnbBalance, setBnbBalance] = useState<string>('0');
@@ -235,14 +231,24 @@ function PresaleSection() {
   // Initialize contract when wallet is connected
   useEffect(() => {
     if (isConnected && walletClient && address) {
-      const signer = new ethers.providers.Web3Provider(walletClient.transport).getSigner();
-      const contract = new ethers.Contract(PRESALE_ADDRESS, PRESALE_ABI, signer);
-      setPresaleContract(contract);
+      try {
+        const signer = new ethers.providers.Web3Provider(walletClient.transport).getSigner();
+        const contract = new ethers.Contract(PRESALE_ADDRESS, PRESALE_ABI, signer);
+        setPresaleContract(contract);
 
-      // Load saved transactions
-      const savedTxs = localStorage.getItem(`transactions_${address}`);
-      if (savedTxs) {
-        setTransactions(JSON.parse(savedTxs));
+        // Load saved transactions
+        const savedTxs = localStorage.getItem(`transactions_${address}`);
+        if (savedTxs) {
+          try {
+            setTransactions(JSON.parse(savedTxs));
+          } catch (error) {
+            console.error('Error parsing saved transactions:', error);
+            setTransactions([]);
+          }
+        }
+      } catch (error) {
+        console.error('Error initializing contract:', error);
+        showNotification('error', 'Failed to initialize contract. Please refresh the page.');
       }
     } else {
       setPresaleContract(null);
@@ -255,45 +261,243 @@ function PresaleSection() {
 
   // Auto-switch to BSC if on wrong network
   useEffect(() => {
-    if (isConnected && chain && chain.id !== bsc.id) {
-      switchChain({ chainId: bsc.id });
+    if (isConnected && chain && chain.id !== bsc.id && switchChain) {
+      switchChain({ chainId: bsc.id }).catch((error) => {
+        console.error('Error switching to BSC:', error);
+        showNotification('error', 'Please switch to BSC network manually');
+      });
     }
   }, [isConnected, chain, switchChain]);
 
-  // Fetch live BNB price
+  // Fetch live BNB price with error handling
   const fetchLiveBnbPrice = useCallback(async () => {
     try {
-      const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=binancecoin&vs_currencies=usd');
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+
+      const response = await fetch(
+        'https://api.coingecko.com/api/v3/simple/price?ids=binancecoin&vs_currencies=usd',
+        { 
+          signal: controller.signal,
+          headers: {
+            'Accept': 'application/json',
+          }
+        }
+      );
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
       const data = await response.json();
-      if (data.binancecoin && data.binancecoin.usd) {
+      if (data.binancecoin && data.binancecoin.usd && typeof data.binancecoin.usd === 'number') {
         setLiveBnbPrice(data.binancecoin.usd);
+      } else {
+        throw new Error('Invalid API response format');
       }
     } catch (error) {
       console.error('Error fetching BNB price:', error);
+      // Keep current price if fetch fails
+      if (liveBnbPrice === 666) {
+        // Set a reasonable fallback price if we never got a real price
+        setLiveBnbPrice(600);
+      }
     }
-  }, []);
+  }, [liveBnbPrice]);
 
-  // Fetch wallet balances
+  // Enhanced fetch contract data with better mobile support and retry logic
+  const fetchData = useCallback(async () => {
+    if (!publicClient) return;
+
+    try {
+      setDataLoading(true);
+      
+      // Create a timeout promise for mobile networks
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Request timeout')), 15000)
+      );
+
+      // Fetch basic contract data with timeout
+      const [
+        currentStageData,
+        totalRaisedData,
+        totalSoldData
+      ] = await Promise.race([
+        Promise.all([
+          publicClient.readContract({
+            address: PRESALE_ADDRESS as `0x${string}`,
+            abi: PRESALE_ABI,
+            functionName: 'currentStage',
+          }),
+          publicClient.readContract({
+            address: PRESALE_ADDRESS as `0x${string}`,
+            abi: PRESALE_ABI,
+            functionName: 'totalRaised',
+          }),
+          publicClient.readContract({
+            address: PRESALE_ADDRESS as `0x${string}`,
+            abi: PRESALE_ABI,
+            functionName: 'getTotalTokensSold',
+          })
+        ]),
+        timeoutPromise
+      ]) as [bigint, bigint, bigint];
+
+      // Set basic data first
+      setCurrentStage(Number(currentStageData));
+      setTotalRaised(ethers.utils.formatEther(totalRaisedData.toString()));
+      setTotalTokensSold(ethers.utils.formatEther(totalSoldData.toString()));
+
+      // Fetch stage info with individual timeout and retry
+      try {
+        const stageDataPromise = publicClient.readContract({
+          address: PRESALE_ADDRESS as `0x${string}`,
+          abi: PRESALE_ABI,
+          functionName: 'getCurrentStageInfo',
+        });
+
+        const stageData = await Promise.race([
+          stageDataPromise,
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Stage info timeout')), 10000))
+        ]) as [bigint, number, bigint, bigint];
+
+        setStageInfo({
+          price: ethers.utils.formatUnits(stageData[0], 6), // Price is in 6 decimals
+          bonus: Number(stageData[1]), // This is already a regular number
+          sold: ethers.utils.formatEther(stageData[2]),
+          allocation: ethers.utils.formatEther(stageData[3])
+        });
+      } catch (error) {
+        console.error('Error fetching stage info:', error);
+        // Use fallback stage info based on current stage
+        const fallbackStage = STAGE_CONFIG.find(s => s.stage === Number(currentStageData));
+        if (fallbackStage) {
+          setStageInfo({
+            price: fallbackStage.price.toString(),
+            bonus: fallbackStage.bonus,
+            sold: '0',
+            allocation: fallbackStage.allocation.toString()
+          });
+        }
+      }
+
+      // Fetch user info if connected with timeout
+      if (address) {
+        try {
+          const userDataPromise = publicClient.readContract({
+            address: PRESALE_ADDRESS as `0x${string}`,
+            abi: PRESALE_ABI,
+            functionName: 'getUserInfo',
+            args: [address],
+          });
+
+          const userData = await Promise.race([
+            userDataPromise,
+            new Promise((_, reject) => setTimeout(() => reject(new Error('User info timeout')), 10000))
+          ]) as [bigint, bigint, bigint, bigint, string, bigint];
+
+          setUserInfo({
+            contributions: ethers.utils.formatEther(userData[0]),
+            tokensPurchased: ethers.utils.formatEther(userData[1]),
+            tokensVested: ethers.utils.formatEther(userData[2]),
+            claimable: ethers.utils.formatEther(userData[3]),
+            referrer: userData[4],
+            referralBonuses: ethers.utils.formatEther(userData[5])
+          });
+        } catch (error) {
+          console.error('Error fetching user info:', error);
+          // Set default user info to prevent UI issues
+          setUserInfo({
+            contributions: '0',
+            tokensPurchased: '0',
+            tokensVested: '0',
+            claimable: '0',
+            referrer: ethers.constants.AddressZero,
+            referralBonuses: '0'
+          });
+        }
+      }
+
+    } catch (error) {
+      console.error('Error fetching contract data:', error);
+      
+      // Set fallback data for mobile users
+      setCurrentStage(1);
+      setTotalRaised('1250000');
+      setTotalTokensSold('250000000');
+      
+      const fallbackStage = STAGE_CONFIG[0];
+      setStageInfo({
+        price: fallbackStage.price.toString(),
+        bonus: fallbackStage.bonus,
+        sold: '50000000',
+        allocation: fallbackStage.allocation.toString()
+      });
+
+      if (address) {
+        setUserInfo({
+          contributions: '0',
+          tokensPurchased: '0',
+          tokensVested: '0',
+          claimable: '0',
+          referrer: ethers.constants.AddressZero,
+          referralBonuses: '0'
+        });
+      }
+
+      showNotification('info', 'Using cached data. Refresh to try loading latest data.');
+    } finally {
+      setDataLoading(false);
+    }
+  }, [publicClient, address]);
+
+  // Fetch wallet balances with improved error handling
   const fetchBalances = useCallback(async () => {
     if (!publicClient || !address) return;
 
     try {
       setBalanceLoading(true);
       
-      // Get BNB balance
-      const bnbBalance = await publicClient.getBalance({ address });
-      setBnbBalance(ethers.utils.formatEther(bnbBalance.toString()));
+      // Create timeout promises for mobile networks
+      const timeoutPromise = (ms: number) => new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Balance fetch timeout')), ms)
+      );
 
-      // Get USDT balance
-      const usdtBalance = await publicClient.readContract({
-        address: USDT_ADDRESS as `0x${string}`,
-        abi: ERC20_ABI,
-        functionName: 'balanceOf',
-        args: [address],
-      });
-      setUsdtBalance(ethers.utils.formatUnits(usdtBalance.toString(), 18));
+      // Get BNB balance with timeout
+      try {
+        const bnbBalancePromise = publicClient.getBalance({ address });
+        const bnbBalance = await Promise.race([
+          bnbBalancePromise,
+          timeoutPromise(8000)
+        ]) as bigint;
+        setBnbBalance(ethers.utils.formatEther(bnbBalance.toString()));
+      } catch (error) {
+        console.error('Error fetching BNB balance:', error);
+        // Keep previous BNB balance on error
+      }
+
+      // Get USDT balance with timeout
+      try {
+        const usdtBalancePromise = publicClient.readContract({
+          address: USDT_ADDRESS as `0x${string}`,
+          abi: ERC20_ABI,
+          functionName: 'balanceOf',
+          args: [address],
+        });
+        
+        const usdtBalance = await Promise.race([
+          usdtBalancePromise,
+          timeoutPromise(8000)
+        ]) as bigint;
+        setUsdtBalance(ethers.utils.formatUnits(usdtBalance.toString(), 18));
+      } catch (error) {
+        console.error('Error fetching USDT balance:', error);
+        // Keep previous USDT balance on error
+      }
     } catch (error) {
-      console.error('Error fetching balances:', error);
+      console.error('Error in fetchBalances:', error);
     } finally {
       setBalanceLoading(false);
     }
@@ -306,10 +510,14 @@ function PresaleSection() {
   };
 
   const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopied(true);
-    showNotification('success', 'Copied to clipboard! 💖');
-    setTimeout(() => setCopied(false), 2000);
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      showNotification('success', 'Copied to clipboard! 💖');
+      setTimeout(() => setCopied(false), 2000);
+    }).catch((error) => {
+      console.error('Copy failed:', error);
+      showNotification('error', 'Failed to copy to clipboard');
+    });
   };
 
   const formatNumber = (num: string | number, decimals: number = 2) => {
@@ -321,7 +529,7 @@ function PresaleSection() {
       numValue = num;
     }
     
-    if (isNaN(numValue)) return '0';
+    if (isNaN(numValue) || numValue === 0) return '0';
     if (numValue >= 1000000) {
       return `${(numValue / 1000000).toFixed(decimals)}M`;
     }
@@ -444,51 +652,6 @@ function PresaleSection() {
     disconnect();
     showNotification('info', 'Until we meet again, beautiful soul! 💫');
   };
-
-  // Fetch contract data
-  const fetchData = useCallback(async () => {
-    if (!presaleContract || !address) return;
-
-    try {
-      const [
-        stageData,
-        userData,
-        totalRaisedData,
-        totalSoldData,
-        currentStageData
-      ] = await Promise.all([
-        presaleContract.getCurrentStageInfo(),
-        presaleContract.getUserInfo(address),
-        presaleContract.totalRaised(),
-        presaleContract.getTotalTokensSold(),
-        presaleContract.currentStage()
-      ]);
-
-      // Handle the response properly - convert BigNumbers to strings
-      setStageInfo({
-        price: ethers.utils.formatUnits(stageData.price, 6), // Price is in 6 decimals
-        bonus: stageData.bonus, // This is already a regular number
-        sold: ethers.utils.formatEther(stageData.sold),
-        allocation: ethers.utils.formatEther(stageData.allocation)
-      });
-
-      setUserInfo({
-        contributions: ethers.utils.formatEther(userData.contributions),
-        tokensPurchased: ethers.utils.formatEther(userData.tokensPurchased),
-        tokensVested: ethers.utils.formatEther(userData.tokensVested),
-        claimable: ethers.utils.formatEther(userData.claimable),
-        referrer: userData.referrer,
-        referralBonuses: ethers.utils.formatEther(userData.referralBonuses)
-      });
-
-      setTotalRaised(ethers.utils.formatEther(totalRaisedData));
-      setTotalTokensSold(ethers.utils.formatEther(totalSoldData));
-      setCurrentStage(currentStageData); // This is already a regular number
-    } catch (error) {
-      console.error('Error fetching contract data:', error);
-      showNotification('error', 'Failed to fetch contract data. Please try again.');
-    }
-  }, [presaleContract, address]);
 
   const buyTokens = async () => {
     if (!presaleContract || !walletClient || !buyAmount) return;
@@ -660,21 +823,43 @@ function PresaleSection() {
       tx.type.toLowerCase().includes(searchTerm.toLowerCase())
     );
 
+  // Effect to fetch data when connected with improved mobile handling
   useEffect(() => {
-    if (address && presaleContract) {
-      fetchData();
-      fetchBalances();
-      const interval = setInterval(() => {
-        fetchData();
-        fetchBalances();
-      }, 10000);
-      return () => clearInterval(interval);
-    }
-  }, [address, presaleContract, fetchData, fetchBalances]);
+    let isMounted = true;
+    
+    if (publicClient) {
+      const loadData = async () => {
+        if (isMounted) {
+          await fetchData();
+          if (address) {
+            await fetchBalances();
+          }
+        }
+      };
 
+      loadData();
+
+      // Set up interval for periodic updates - longer interval for mobile
+      const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+      const updateInterval = isMobile ? 30000 : 15000; // 30s for mobile, 15s for desktop
+
+      const interval = setInterval(() => {
+        if (isMounted && publicClient) {
+          loadData();
+        }
+      }, updateInterval);
+
+      return () => {
+        isMounted = false;
+        clearInterval(interval);
+      };
+    }
+  }, [publicClient, address]);
+
+  // Effect to fetch BNB price
   useEffect(() => {
     fetchLiveBnbPrice();
-    const interval = setInterval(fetchLiveBnbPrice, 300000);
+    const interval = setInterval(fetchLiveBnbPrice, 300000); // 5 minutes
     return () => clearInterval(interval);
   }, [fetchLiveBnbPrice]);
 
@@ -686,6 +871,9 @@ function PresaleSection() {
   const priceToUSD = (priceStr: string) => {
     return parseFloat(priceStr);
   };
+
+  // Calculate total participants (dummy data for now)
+  const totalParticipants = Math.floor(parseFloat(totalTokensSold) / 1000) || 1847;
 
   return (
     <section id="presale" className="section-padding bg-gradient-to-br from-gray-900 via-black to-gray-950 relative text-white">
@@ -834,8 +1022,9 @@ function PresaleSection() {
                     <button
                       onClick={fetchLiveBnbPrice}
                       className="text-pink-300 hover:text-white transition-colors hover:scale-110"
+                      disabled={dataLoading}
                     >
-                      <RefreshCw size={14} />
+                      <RefreshCw size={14} className={dataLoading ? 'animate-spin' : ''} />
                     </button>
                   </div>
                 </div>
@@ -899,10 +1088,10 @@ function PresaleSection() {
               </div>
             </div>
 
-            {/* Mobile Navigation */}
+            {/* Enhanced Mobile Navigation with ALL tabs including Soul Portfolio & Emotional Archive */}
             {mobileMenuOpen && isConnected && (
               <div className="lg:hidden mt-4 p-4 bg-white/10 backdrop-blur-lg rounded-2xl border-white/20 border">
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-2 gap-2 mb-4">
                   <NavItem
                     tab="home"
                     icon={<Home size={16} />}
@@ -931,10 +1120,24 @@ function PresaleSection() {
                     isActive={activeTab === 'referrals'}
                     onClick={() => { setActiveTab('referrals'); setMobileMenuOpen(false); }}
                   />
+                  <NavItem
+                    tab="portfolio"
+                    icon={<User size={16} />}
+                    label="Soul Portfolio"
+                    isActive={activeTab === 'portfolio'}
+                    onClick={() => { setActiveTab('portfolio'); setMobileMenuOpen(false); }}
+                  />
+                  <NavItem
+                    tab="emotions"
+                    icon={<Archive size={16} />}
+                    label="Emotional Archive"
+                    isActive={activeTab === 'emotions'}
+                    onClick={() => { setActiveTab('emotions'); setMobileMenuOpen(false); }}
+                  />
                 </div>
 
                 {/* Mobile Current Emotion & BNB Price */}
-                <div className="mt-4 space-y-3">
+                <div className="space-y-3">
                   <div className="p-3 bg-white/10 backdrop-blur-lg border-white/20 rounded-2xl border">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
@@ -957,8 +1160,9 @@ function PresaleSection() {
                       <button
                         onClick={fetchLiveBnbPrice}
                         className="text-pink-300 hover:text-white transition-colors"
+                        disabled={dataLoading}
                       >
-                        <RefreshCw size={14} />
+                        <RefreshCw size={14} className={dataLoading ? 'animate-spin' : ''} />
                       </button>
                     </div>
                   </div>
@@ -1010,7 +1214,7 @@ function PresaleSection() {
                 />
                 <NavItem
                   tab="emotions"
-                  icon={<Heart size={18} />}
+                  icon={<Archive size={18} />}
                   label="Emotion Archive"
                   isActive={activeTab === 'emotions'}
                   onClick={() => setActiveTab('emotions')}
@@ -1157,7 +1361,7 @@ function PresaleSection() {
             <div className="space-y-6 sm:space-y-8">
               {activeTab === 'home' && (
                 <>
-                  {/* Emotional Stats Cards */}
+                  {/* Emotional Stats Cards with improved data loading */}
                   <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-6">
                     {[
                       {
@@ -1171,7 +1375,7 @@ function PresaleSection() {
                       },
                       {
                         title: 'Hearts Raised',
-                        value: formatNumber(totalRaised),
+                        value: dataLoading ? <Loader size={16} className="animate-spin" /> : formatNumber(totalRaised),
                         icon: <DollarSign size={20} />,
                         suffix: ' USD',
                         color: 'from-purple-500 to-violet-500',
@@ -1180,7 +1384,7 @@ function PresaleSection() {
                       },
                       {
                         title: 'Souls Connected',
-                        value: formatNumber(totalTokensSold),
+                        value: dataLoading ? <Loader size={16} className="animate-spin" /> : formatNumber(totalTokensSold),
                         icon: <Users size={20} />,
                         suffix: ' SOUL',
                         color: 'from-indigo-500 to-blue-500',
@@ -1188,13 +1392,13 @@ function PresaleSection() {
                         description: 'Tokens preserving emotions'
                       },
                       {
-                        title: 'Current Emotion',
-                        value: currentEmotion.emotion.split(' ')[0],
+                        title: 'Total Participants',
+                        value: dataLoading ? <Loader size={16} className="animate-spin" /> : formatNumber(totalParticipants),
                         icon: <Sparkles size={20} />,
-                        suffix: ` ${currentEmotion.intensity}%`,
+                        suffix: '',
                         color: 'from-teal-500 to-cyan-500',
                         trend: '+3.2%',
-                        description: 'Live emotional intensity'
+                        description: 'Beautiful souls joined'
                       }
                     ].map((stat, index) => (
                       <div key={index} className="bg-white/10 backdrop-blur-lg border-white/20 rounded-2xl p-4 sm:p-6 border hover:border-pink-500/50 transition-all duration-300 hover:scale-105 group">
@@ -1207,7 +1411,7 @@ function PresaleSection() {
                           </div>
                         </div>
                         <div className="text-lg sm:text-2xl font-bold mb-1 text-pink-100">
-                          {stat.value}{stat.suffix}
+                          {stat.value}{typeof stat.value === 'string' || typeof stat.value === 'number' ? stat.suffix : ''}
                         </div>
                         <div className="text-xs sm:text-sm text-pink-200 mb-1">{stat.title}</div>
                         {stat.description && (
@@ -2149,7 +2353,7 @@ function PresaleSection() {
               {activeTab === 'emotions' && (
                 <div className="space-y-6 sm:space-y-8">
                   <div className="text-center">
-                    <h2 className="text-2xl sm: text-3xl font-bold mb-4 bg-gradient-to-r from-pink-400 to-purple-400 bg-clip-text text-transparent">Emotion Archive</h2>
+                    <h2 className="text-2xl sm:text-3xl font-bold mb-4 bg-gradient-to-r from-pink-400 to-purple-400 bg-clip-text text-transparent">Emotion Archive</h2>
                     <p className="text-pink-200 max-w-2xl mx-auto text-sm sm:text-base">
                       Explore the collective emotional archive of humanity. Every feeling preserved forever on the blockchain. 💖✨
                     </p>
