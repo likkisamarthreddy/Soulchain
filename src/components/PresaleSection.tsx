@@ -88,8 +88,7 @@ const PRESALE_ABI = [
   "function claimTokens() external",
   "function claimReferralBonus() external",
   "function getBNBPrice() external view returns (uint256)",
-  "function getStageUSDPrice(uint8 stage) external view returns (uint256)",
-  "function totalParticipants() external view returns (uint256)"
+  "function getStageUSDPrice(uint8 stage) external view returns (uint256)"
 ];
 
 const ERC20_ABI = [
@@ -145,16 +144,6 @@ interface EmotionalMoment {
   color: string;
 }
 
-interface ContractData {
-  currentStage: number;
-  totalRaised: string;
-  totalTokensSold: string;
-  totalParticipants: number;
-  presaleActive: boolean;
-  tgeEnabled: boolean;
-  bnbPrice: string;
-}
-
 // Stage configuration
 const STAGE_CONFIG = [
   { stage: 1, price: 0.005, bonus: 20, allocation: 200000000, emotion: "First Spark", description: "The beginning of emotional awakening" },
@@ -197,22 +186,15 @@ function PresaleSection() {
   const { open } = useWeb3Modal();
 
   // Core state
-  const [contractData, setContractData] = useState<ContractData>({
-    currentStage: 1,
-    totalRaised: '0',
-    totalTokensSold: '0',
-    totalParticipants: 0,
-    presaleActive: false,
-    tgeEnabled: false,
-    bnbPrice: '0'
-  });
+  const [currentStage, setCurrentStage] = useState<number>(1);
   const [stageInfo, setStageInfo] = useState<StageInfo | null>(null);
   const [userInfo, setUserInfo] = useState<UserInfo | null>(null);
+  const [totalRaised, setTotalRaised] = useState<string>('0');
+  const [totalTokensSold, setTotalTokensSold] = useState<string>('0');
   const [liveBnbPrice, setLiveBnbPrice] = useState<number>(666);
   const [loading, setLoading] = useState<boolean>(false);
   const [txLoading, setTxLoading] = useState<boolean>(false);
   const [dataLoading, setDataLoading] = useState<boolean>(false);
-  const [lastUpdateTime, setLastUpdateTime] = useState<number>(Date.now());
 
   // Balance state
   const [bnbBalance, setBnbBalance] = useState<string>('0');
@@ -325,108 +307,83 @@ function PresaleSection() {
     }
   }, [liveBnbPrice]);
 
-  // Enhanced fetch contract data with real-time updates
+  // Enhanced fetch contract data with better mobile support and retry logic
   const fetchData = useCallback(async () => {
     if (!publicClient) return;
 
     try {
       setDataLoading(true);
       
-      // Create timeout for contract calls
+      // Create a timeout promise for mobile networks
       const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Contract call timeout')), 20000)
+        setTimeout(() => reject(new Error('Request timeout')), 15000)
       );
 
-      // Fetch all contract data in parallel
-      const contractPromises = [
-        publicClient.readContract({
-          address: PRESALE_ADDRESS as `0x${string}`,
-          abi: PRESALE_ABI,
-          functionName: 'currentStage',
-        }),
-        publicClient.readContract({
-          address: PRESALE_ADDRESS as `0x${string}`,
-          abi: PRESALE_ABI,
-          functionName: 'totalRaised',
-        }),
-        publicClient.readContract({
-          address: PRESALE_ADDRESS as `0x${string}`,
-          abi: PRESALE_ABI,
-          functionName: 'getTotalTokensSold',
-        }),
-        publicClient.readContract({
-          address: PRESALE_ADDRESS as `0x${string}`,
-          abi: PRESALE_ABI,
-          functionName: 'presaleActive',
-        }),
-        publicClient.readContract({
-          address: PRESALE_ADDRESS as `0x${string}`,
-          abi: PRESALE_ABI,
-          functionName: 'tgeEnabled',
-        }),
-        publicClient.readContract({
-          address: PRESALE_ADDRESS as `0x${string}`,
-          abi: PRESALE_ABI,
-          functionName: 'getCurrentStageInfo',
-        })
-      ];
-
-      // Try to get total participants if the function exists
-      try {
-        contractPromises.push(
-          publicClient.readContract({
-            address: PRESALE_ADDRESS as `0x${string}`,
-            abi: PRESALE_ABI,
-            functionName: 'totalParticipants',
-          })
-        );
-      } catch (error) {
-        console.log('totalParticipants function not available');
-      }
-
-      const results = await Promise.race([
-        Promise.all(contractPromises),
-        timeoutPromise
-      ]) as any[];
-
-      // Parse results
+      // Fetch basic contract data with timeout
       const [
         currentStageData,
         totalRaisedData,
-        totalSoldData,
-        presaleActiveData,
-        tgeEnabledData,
-        stageInfoData,
-        totalParticipantsData
-      ] = results;
+        totalSoldData
+      ] = await Promise.race([
+        Promise.all([
+          publicClient.readContract({
+            address: PRESALE_ADDRESS as `0x${string}`,
+            abi: PRESALE_ABI,
+            functionName: 'currentStage',
+          }),
+          publicClient.readContract({
+            address: PRESALE_ADDRESS as `0x${string}`,
+            abi: PRESALE_ABI,
+            functionName: 'totalRaised',
+          }),
+          publicClient.readContract({
+            address: PRESALE_ADDRESS as `0x${string}`,
+            abi: PRESALE_ABI,
+            functionName: 'getTotalTokensSold',
+          })
+        ]),
+        timeoutPromise
+      ]) as [bigint, bigint, bigint];
 
-      // Calculate total participants from token sales if direct function not available
-      const calculatedParticipants = totalParticipantsData 
-        ? Number(totalParticipantsData)
-        : Math.max(Math.floor(Number(ethers.utils.formatEther(totalSoldData.toString())) / 5000), 1);
+      // Set basic data first
+      setCurrentStage(Number(currentStageData));
+      setTotalRaised(ethers.utils.formatEther(totalRaisedData.toString()));
+      setTotalTokensSold(ethers.utils.formatEther(totalSoldData.toString()));
 
-      // Update contract data
-      setContractData({
-        currentStage: Number(currentStageData),
-        totalRaised: ethers.utils.formatEther(totalRaisedData.toString()),
-        totalTokensSold: ethers.utils.formatEther(totalSoldData.toString()),
-        totalParticipants: calculatedParticipants,
-        presaleActive: Boolean(presaleActiveData),
-        tgeEnabled: Boolean(tgeEnabledData),
-        bnbPrice: liveBnbPrice.toString()
-      });
-
-      // Update stage info
-      if (stageInfoData) {
-        setStageInfo({
-          price: ethers.utils.formatUnits(stageInfoData[0], 6), // Price is in 6 decimals
-          bonus: Number(stageInfoData[1]), // This is already a regular number
-          sold: ethers.utils.formatEther(stageInfoData[2]),
-          allocation: ethers.utils.formatEther(stageInfoData[3])
+      // Fetch stage info with individual timeout and retry
+      try {
+        const stageDataPromise = publicClient.readContract({
+          address: PRESALE_ADDRESS as `0x${string}`,
+          abi: PRESALE_ABI,
+          functionName: 'getCurrentStageInfo',
         });
+
+        const stageData = await Promise.race([
+          stageDataPromise,
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Stage info timeout')), 10000))
+        ]) as [bigint, number, bigint, bigint];
+
+        setStageInfo({
+          price: ethers.utils.formatUnits(stageData[0], 6), // Price is in 6 decimals
+          bonus: Number(stageData[1]), // This is already a regular number
+          sold: ethers.utils.formatEther(stageData[2]),
+          allocation: ethers.utils.formatEther(stageData[3])
+        });
+      } catch (error) {
+        console.error('Error fetching stage info:', error);
+        // Use fallback stage info based on current stage
+        const fallbackStage = STAGE_CONFIG.find(s => s.stage === Number(currentStageData));
+        if (fallbackStage) {
+          setStageInfo({
+            price: fallbackStage.price.toString(),
+            bonus: fallbackStage.bonus,
+            sold: '0',
+            allocation: fallbackStage.allocation.toString()
+          });
+        }
       }
 
-      // Fetch user info if connected
+      // Fetch user info if connected with timeout
       if (address) {
         try {
           const userDataPromise = publicClient.readContract({
@@ -463,33 +420,23 @@ function PresaleSection() {
         }
       }
 
-      setLastUpdateTime(Date.now());
-
     } catch (error) {
       console.error('Error fetching contract data:', error);
       
       // Set fallback data for mobile users
-      setContractData(prev => ({
-        ...prev,
-        currentStage: 1,
-        totalRaised: prev.totalRaised || '1250000',
-        totalTokensSold: prev.totalTokensSold || '250000000',
-        totalParticipants: prev.totalParticipants || 1847,
-        presaleActive: true,
-        tgeEnabled: false
-      }));
+      setCurrentStage(1);
+      setTotalRaised('250000');
+      setTotalTokensSold('50000000');
       
       const fallbackStage = STAGE_CONFIG[0];
-      if (!stageInfo) {
-        setStageInfo({
-          price: fallbackStage.price.toString(),
-          bonus: fallbackStage.bonus,
-          sold: '50000000',
-          allocation: fallbackStage.allocation.toString()
-        });
-      }
+      setStageInfo({
+        price: fallbackStage.price.toString(),
+        bonus: fallbackStage.bonus,
+        sold: '50000000',
+        allocation: fallbackStage.allocation.toString()
+      });
 
-      if (address && !userInfo) {
+      if (address) {
         setUserInfo({
           contributions: '0',
           tokensPurchased: '0',
@@ -504,7 +451,7 @@ function PresaleSection() {
     } finally {
       setDataLoading(false);
     }
-  }, [publicClient, address, liveBnbPrice, stageInfo, userInfo]);
+  }, [publicClient, address]);
 
   // Fetch wallet balances with improved error handling
   const fetchBalances = useCallback(async () => {
@@ -622,15 +569,15 @@ function PresaleSection() {
 
   // Update calculated tokens when amount, stage, or method changes
   useEffect(() => {
-    if (buyAmount && contractData.currentStage) {
-      const result = calculatePurchaseBonus(buyAmount, contractData.currentStage, buyMethod);
+    if (buyAmount && currentStage) {
+      const result = calculatePurchaseBonus(buyAmount, currentStage, buyMethod);
       setCalculatedTokens(result.total);
       setCalculatedBonus(result.bonus);
     } else {
       setCalculatedTokens('0');
       setCalculatedBonus('0');
     }
-  }, [buyAmount, contractData.currentStage, buyMethod, calculatePurchaseBonus]);
+  }, [buyAmount, currentStage, buyMethod, calculatePurchaseBonus]);
 
   // ROI Calculator
   const calculateROI = useCallback(() => {
@@ -759,7 +706,7 @@ function PresaleSection() {
         bonus: calculatedBonus,
         timestamp: Date.now(),
         status: 'pending',
-        stage: contractData.currentStage
+        stage: currentStage
       };
 
       const updatedTxs = [newTx, ...transactions];
@@ -822,7 +769,7 @@ function PresaleSection() {
         bonus: '0',
         timestamp: Date.now(),
         status: 'pending',
-        stage: contractData.currentStage
+        stage: currentStage
       };
 
       const updatedTxs = [newTx, ...transactions];
@@ -924,6 +871,9 @@ function PresaleSection() {
   const priceToUSD = (priceStr: string) => {
     return parseFloat(priceStr);
   };
+
+  // Calculate total participants (dummy data for now)
+  const totalParticipants = Math.floor(parseFloat(totalTokensSold) / 1000) || 1847;
 
   return (
     <section id="presale" className="section-padding bg-gradient-to-br from-gray-900 via-black to-gray-950 relative text-white">
@@ -1064,16 +1014,15 @@ function PresaleSection() {
                   </div>
                 </div>
 
-                {/* Live BNB Price & Last Update */}
+                {/* Live BNB Price */}
                 <div className="hidden md:block bg-white/10 backdrop-blur-lg border-white/20 rounded-2xl px-4 py-2 border">
                   <div className="flex items-center gap-2">
                     <div className="w-3 h-3 bg-yellow-400 rounded-full animate-pulse"></div>
                     <span className="text-sm font-medium">BNB: ${liveBnbPrice.toFixed(2)}</span>
                     <button
-                      onClick={fetchData}
+                      onClick={fetchLiveBnbPrice}
                       className="text-pink-300 hover:text-white transition-colors hover:scale-110"
                       disabled={dataLoading}
-                      title={`Last updated: ${new Date(lastUpdateTime).toLocaleTimeString()}`}
                     >
                       <RefreshCw size={14} className={dataLoading ? 'animate-spin' : ''} />
                     </button>
@@ -1187,7 +1136,7 @@ function PresaleSection() {
                   />
                 </div>
 
-                {/* Mobile Current Emotion & BNB Price & Real-time Stats */}
+                {/* Mobile Current Emotion & BNB Price */}
                 <div className="space-y-3">
                   <div className="p-3 bg-white/10 backdrop-blur-lg border-white/20 rounded-2xl border">
                     <div className="flex items-center justify-between">
@@ -1209,37 +1158,12 @@ function PresaleSection() {
                         <span className="text-sm font-medium">BNB: ${liveBnbPrice.toFixed(2)}</span>
                       </div>
                       <button
-                        onClick={fetchData}
+                        onClick={fetchLiveBnbPrice}
                         className="text-pink-300 hover:text-white transition-colors"
                         disabled={dataLoading}
                       >
                         <RefreshCw size={14} className={dataLoading ? 'animate-spin' : ''} />
                       </button>
-                    </div>
-                  </div>
-
-                  <div className="p-3 bg-white/10 backdrop-blur-lg border-white/20 rounded-2xl border">
-                    <div className="text-xs text-pink-300 mb-1">Live Presale Data</div>
-                    <div className="grid grid-cols-2 gap-2 text-xs">
-                      <div>
-                        <span className="text-pink-200">Hearts: </span>
-                        <span className="text-white font-bold">${formatNumber(contractData.totalRaised)}</span>
-                      </div>
-                      <div>
-                        <span className="text-pink-200">Souls: </span>
-                        <span className="text-white font-bold">{formatNumber(contractData.totalTokensSold)}</span>
-                      </div>
-                      <div>
-                        <span className="text-pink-200">Stage: </span>
-                        <span className="text-white font-bold">{contractData.currentStage}</span>
-                      </div>
-                      <div>
-                        <span className="text-pink-200">Users: </span>
-                        <span className="text-white font-bold">{contractData.totalParticipants}</span>
-                      </div>
-                    </div>
-                    <div className="text-xs text-purple-300 mt-2">
-                      Updated: {new Date(lastUpdateTime).toLocaleTimeString()}
                     </div>
                   </div>
                 </div>
@@ -1295,16 +1219,6 @@ function PresaleSection() {
                   isActive={activeTab === 'emotions'}
                   onClick={() => setActiveTab('emotions')}
                 />
-                
-                {/* Real-time Data Indicator */}
-                <div className="ml-auto flex items-center gap-2 text-xs text-pink-300">
-                  <div className="flex items-center gap-1">
-                    <div className={`w-2 h-2 rounded-full ${contractData.presaleActive ? 'bg-green-400 animate-pulse' : 'bg-red-400'}`}></div>
-                    <span>{contractData.presaleActive ? 'Live' : 'Offline'}</span>
-                  </div>
-                  <span>•</span>
-                  <span>Updated: {new Date(lastUpdateTime).toLocaleTimeString()}</span>
-                </div>
               </div>
             </div>
           </div>
@@ -1447,48 +1361,44 @@ function PresaleSection() {
             <div className="space-y-6 sm:space-y-8">
               {activeTab === 'home' && (
                 <>
-                  {/* Real-time Emotional Stats Cards */}
+                  {/* Emotional Stats Cards with improved data loading */}
                   <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-6">
                     {[
                       {
                         title: 'Emotional Stage',
-                        value: STAGE_CONFIG.find(s => s.stage === contractData.currentStage)?.emotion || `Stage ${contractData.currentStage}`,
+                        value: STAGE_CONFIG.find(s => s.stage === currentStage)?.emotion || `Stage ${currentStage}`,
                         icon: <Heart size={20} fill="currentColor" />,
                         suffix: '',
                         color: 'from-pink-500 to-rose-500',
                         trend: '+2.1%',
-                        description: STAGE_CONFIG.find(s => s.stage === contractData.currentStage)?.description || '',
-                        realTime: true
+                        description: STAGE_CONFIG.find(s => s.stage === currentStage)?.description || ''
                       },
                       {
                         title: 'Hearts Raised',
-                        value: dataLoading ? <Loader size={16} className="animate-spin" /> : formatNumber(contractData.totalRaised),
+                        value: dataLoading ? <Loader size={16} className="animate-spin" /> : formatNumber(totalRaised),
                         icon: <DollarSign size={20} />,
                         suffix: ' USD',
                         color: 'from-purple-500 to-violet-500',
                         trend: '+15.3%',
-                        description: 'Total emotional investment from blockchain',
-                        realTime: true
+                        description: 'Total emotional investment'
                       },
                       {
                         title: 'Souls Connected',
-                        value: dataLoading ? <Loader size={16} className="animate-spin" /> : formatNumber(contractData.totalTokensSold),
+                        value: dataLoading ? <Loader size={16} className="animate-spin" /> : formatNumber(totalTokensSold),
                         icon: <Users size={20} />,
                         suffix: ' SOUL',
                         color: 'from-indigo-500 to-blue-500',
                         trend: '+8.7%',
-                        description: 'Real SOUL tokens preserving emotions',
-                        realTime: true
+                        description: 'Tokens preserving emotions'
                       },
                       {
                         title: 'Total Participants',
-                        value: dataLoading ? <Loader size={16} className="animate-spin" /> : formatNumber(contractData.totalParticipants),
+                        value: dataLoading ? <Loader size={16} className="animate-spin" /> : formatNumber(totalParticipants),
                         icon: <Sparkles size={20} />,
                         suffix: '',
                         color: 'from-teal-500 to-cyan-500',
                         trend: '+3.2%',
-                        description: 'Beautiful souls joined from contract data',
-                        realTime: true
+                        description: 'Beautiful souls joined'
                       }
                     ].map((stat, index) => (
                       <div key={index} className="bg-white/10 backdrop-blur-lg border-white/20 rounded-2xl p-4 sm:p-6 border hover:border-pink-500/50 transition-all duration-300 hover:scale-105 group">
@@ -1496,13 +1406,8 @@ function PresaleSection() {
                           <div className={`w-10 h-10 sm:w-12 sm:h-12 bg-gradient-to-r ${stat.color} rounded-xl flex items-center justify-center shadow-lg group-hover:scale-110 transition-transform duration-300`}>
                             {stat.icon}
                           </div>
-                          <div className="flex items-center gap-1">
-                            {stat.realTime && (
-                              <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" title="Real-time data"></div>
-                            )}
-                            <div className={`text-xs px-2 py-1 rounded-full ${stat.trend.startsWith('+') ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
-                              {stat.trend}
-                            </div>
+                          <div className={`text-xs px-2 py-1 rounded-full ${stat.trend.startsWith('+') ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
+                            {stat.trend}
                           </div>
                         </div>
                         <div className="text-lg sm:text-2xl font-bold mb-1 text-pink-100">
@@ -1525,10 +1430,10 @@ function PresaleSection() {
                           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between mb-6 gap-4">
                             <div>
                               <h3 className="text-xl sm:text-2xl font-bold text-pink-100 mb-2">
-                                {STAGE_CONFIG.find(s => s.stage === contractData.currentStage)?.emotion || `Stage ${contractData.currentStage}`}
+                                {STAGE_CONFIG.find(s => s.stage === currentStage)?.emotion || `Stage ${currentStage}`}
                               </h3>
                               <p className="text-sm text-purple-200">
-                                {STAGE_CONFIG.find(s => s.stage === contractData.currentStage)?.description || 'Emotional journey continues'}
+                                {STAGE_CONFIG.find(s => s.stage === currentStage)?.description || 'Emotional journey continues'}
                               </p>
                             </div>
                             <div className="bg-gradient-to-r from-pink-500/20 to-purple-500/20 px-4 sm:px-6 py-2 sm:py-3 rounded-full border border-pink-500/30">
@@ -1548,7 +1453,7 @@ function PresaleSection() {
                             <div className="text-center p-4 bg-white/5 rounded-2xl">
                               <div className="text-xs sm:text-sm text-pink-200 mb-2">Next Stage Price</div>
                               <div className="text-2xl sm:text-3xl font-bold text-orange-400">
-                                ${contractData.currentStage < 10 ? STAGE_CONFIG.find(s => s.stage === contractData.currentStage + 1)?.price.toFixed(3) : 'N/A'}
+                                ${currentStage < 10 ? STAGE_CONFIG.find(s => s.stage === currentStage + 1)?.price.toFixed(3) : 'N/A'}
                               </div>
                             </div>
                           </div>
@@ -1571,36 +1476,6 @@ function PresaleSection() {
                             </div>
                           </div>
 
-                          {/* Real-time Presale Status */}
-                          <div className="mt-6 sm:mt-8 p-4 sm:p-6 bg-gradient-to-r from-green-500/10 to-emerald-500/10 rounded-2xl border border-green-500/20">
-                            <h4 className="font-bold mb-4 flex items-center gap-2 text-sm sm:text-base text-green-400">
-                              <Activity size={18} />
-                              Live Presale Status
-                            </h4>
-                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                              <div className="text-center">
-                                <div className={`text-sm mb-1 ${contractData.presaleActive ? 'text-green-400' : 'text-red-400'}`}>
-                                  {contractData.presaleActive ? 'Active' : 'Inactive'}
-                                </div>
-                                <div className="text-xs text-pink-200">Presale Status</div>
-                              </div>
-                              <div className="text-center">
-                                <div className={`text-sm mb-1 ${contractData.tgeEnabled ? 'text-green-400' : 'text-yellow-400'}`}>
-                                  {contractData.tgeEnabled ? 'Enabled' : 'Coming Soon'}
-                                </div>
-                                <div className="text-xs text-pink-200">Token Claims</div>
-                              </div>
-                              <div className="text-center">
-                                <div className="text-sm mb-1 text-white">${liveBnbPrice.toFixed(2)}</div>
-                                <div className="text-xs text-pink-200">BNB Price</div>
-                              </div>
-                              <div className="text-center">
-                                <div className="text-sm mb-1 text-white">{new Date(lastUpdateTime).toLocaleTimeString()}</div>
-                                <div className="text-xs text-pink-200">Last Update</div>
-                              </div>
-                            </div>
-                          </div>
-
                           {/* Emotional Journey Timeline */}
                           <div className="mt-6 sm:mt-8 p-4 sm:p-6 bg-gradient-to-r from-pink-500/10 to-purple-500/10 rounded-2xl border border-pink-500/20">
                             <h4 className="font-bold mb-4 flex items-center gap-2 text-sm sm:text-base text-pink-100">
@@ -1612,9 +1487,9 @@ function PresaleSection() {
                                 <div
                                   key={stage.stage}
                                   className={`text-center p-2 sm:p-3 rounded-xl transition-all duration-300 ${
-                                    stage.stage === contractData.currentStage
+                                    stage.stage === currentStage
                                       ? 'bg-gradient-to-r from-pink-500/20 to-purple-500/20 border border-pink-500/30'
-                                      : stage.stage < contractData.currentStage
+                                      : stage.stage < currentStage
                                         ? 'bg-green-500/10 border border-green-500/20'
                                         : 'bg-white/5 border border-white/10'
                                   }`}
@@ -1636,15 +1511,12 @@ function PresaleSection() {
                           Invest in Your Soul
                         </h3>
 
-                        {/* Real-time Wallet Balance Display */}
+                        {/* Wallet Balance Display */}
                         <div className="grid grid-cols-2 gap-4 mb-6">
                           <div className="bg-gradient-to-r from-yellow-500/10 to-orange-500/10 rounded-2xl p-4 border border-yellow-500/20">
                             <div className="flex items-center justify-between">
                               <div>
-                                <div className="text-xs text-pink-200 mb-1 flex items-center gap-1">
-                                  <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
-                                  BNB Balance
-                                </div>
+                                <div className="text-xs text-pink-200 mb-1">BNB Balance</div>
                                 <div className="text-lg font-bold text-yellow-400">
                                   {balanceLoading ? (
                                     <Loader className="animate-spin" size={16} />
@@ -1662,10 +1534,7 @@ function PresaleSection() {
                           <div className="bg-gradient-to-r from-green-500/10 to-emerald-500/10 rounded-2xl p-4 border border-green-500/20">
                             <div className="flex items-center justify-between">
                               <div>
-                                <div className="text-xs text-pink-200 mb-1 flex items-center gap-1">
-                                  <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
-                                  USDT Balance
-                                </div>
+                                <div className="text-xs text-pink-200 mb-1">USDT Balance</div>
                                 <div className="text-lg font-bold text-green-400">
                                   {balanceLoading ? (
                                     <Loader className="animate-spin" size={16} />
@@ -1757,12 +1626,12 @@ function PresaleSection() {
                             )}
                           </div>
 
-                          {/* Enhanced Emotional Investment Calculation */}
+                          {/* Emotional Investment Calculation */}
                           {buyAmount && (
                             <div className="bg-gradient-to-r from-green-500/10 to-emerald-500/10 rounded-2xl p-4 sm:p-6 border border-green-500/20">
                               <h4 className="font-bold mb-4 text-green-400 flex items-center gap-2 text-sm sm:text-base">
                                 <Calculator size={18} />
-                                Your Emotional Investment (Real-time Calculation)
+                                Your Emotional Investment
                               </h4>
                               <div className="space-y-3">
                                 <div className="flex justify-between text-sm">
@@ -1770,7 +1639,7 @@ function PresaleSection() {
                                   <span className="font-bold text-white">{formatNumber(parseFloat(calculatedTokens) - parseFloat(calculatedBonus))} SOUL</span>
                                 </div>
                                 <div className="flex justify-between text-sm">
-                                  <span className="text-pink-200">Stage {contractData.currentStage} Bonus ({stageInfo?.bonus}%):</span>
+                                  <span className="text-pink-200">Emotional Bonus ({stageInfo?.bonus}%):</span>
                                   <span className="font-bold text-green-400">+{formatNumber(calculatedBonus)} SOUL</span>
                                 </div>
                                 <div className="border-t border-green-500/20 pt-3">
@@ -1782,11 +1651,6 @@ function PresaleSection() {
                                 <div className="text-center mt-4 p-3 bg-purple-500/10 rounded-xl border border-purple-500/20">
                                   <span className="text-xs sm:text-sm text-purple-300">
                                     💖 You save ${formatNumber((parseFloat(calculatedBonus) * (stageInfo ? priceToUSD(stageInfo.price) : 0)))} with emotional bonus!
-                                  </span>
-                                </div>
-                                <div className="text-center mt-2 p-2 bg-blue-500/10 rounded-xl border border-blue-500/20">
-                                  <span className="text-xs text-blue-300">
-                                    🚀 At listing ($0.1): ${formatNumber(parseFloat(calculatedTokens) * 0.1)} value
                                   </span>
                                 </div>
                               </div>
@@ -1808,15 +1672,10 @@ function PresaleSection() {
 
                           <button
                             onClick={buyTokens}
-                            disabled={!buyAmount || txLoading || parseFloat(buyAmount) <= 0 || !contractData.presaleActive}
+                            disabled={!buyAmount || txLoading || parseFloat(buyAmount) <= 0}
                             className="w-full bg-gradient-to-r from-pink-500 via-purple-500 to-indigo-500 hover:from-pink-600 hover:via-purple-600 hover:to-indigo-600 px-6 py-4 sm:py-6 rounded-2xl font-bold text-base sm:text-xl flex items-center justify-center gap-3 transition-all duration-300 shadow-2xl shadow-pink-500/25 disabled:opacity-50 hover:scale-105 disabled:hover:scale-100"
                           >
-                            {!contractData.presaleActive ? (
-                              <>
-                                <AlertCircle size={20} />
-                                <span className="text-sm sm:text-base">Presale Not Active</span>
-                              </>
-                            ) : txLoading ? (
+                            {txLoading ? (
                               <>
                                 <Loader className="animate-spin" size={20} />
                                 Processing Your Emotional Investment...
@@ -1832,14 +1691,14 @@ function PresaleSection() {
                       </div>
                     </div>
 
-                    {/* Enhanced Soul Stats Sidebar */}
+                    {/* Soul Stats Sidebar */}
                     <div className="space-y-6">
                       {userInfo && (
                         <>
                           <div className="bg-white/10 backdrop-blur-lg border-white/20 rounded-2xl p-6 border hover:border-pink-500/30 transition-all duration-300">
                             <h3 className="text-lg sm:text-xl font-bold mb-6 flex items-center gap-2 text-pink-100">
                               <User size={18} />
-                              Your Soul Portfolio (Live)
+                              Your Soul Portfolio
                             </h3>
                             <div className="space-y-4">
                               <div className="flex justify-between items-center">
@@ -1855,13 +1714,10 @@ function PresaleSection() {
                                 <span className="font-bold text-lg sm:text-xl text-green-400">{formatNumber(userInfo.referralBonuses)} SOUL</span>
                               </div>
 
-                              {/* Real-time Soul Portfolio Value */}
+                              {/* Soul Portfolio Value */}
                               <div className="mt-6 p-4 bg-gradient-to-r from-blue-500/10 to-purple-500/10 rounded-xl border border-blue-500/20">
                                 <div className="text-center">
-                                  <div className="text-xs sm:text-sm text-pink-200 mb-1 flex items-center justify-center gap-1">
-                                    <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
-                                    Current Soul Value (Live)
-                                  </div>
+                                  <div className="text-xs sm:text-sm text-pink-200 mb-1">Current Soul Value</div>
                                   <div className="text-xl sm:text-2xl font-bold text-blue-400">
                                     ${formatNumber(
                                       (parseFloat(userInfo.tokensPurchased) + parseFloat(userInfo.referralBonuses)) * 
@@ -1883,31 +1739,26 @@ function PresaleSection() {
                             </div>
                           </div>
 
-                          {/* Enhanced Claim Section */}
-                          {(parseFloat(userInfo.claimable) > 0 || contractData.tgeEnabled) && (
+                          {/* Claim Section */}
+                          {parseFloat(userInfo.claimable) > 0 && (
                             <div className="bg-white/10 backdrop-blur-lg border-white/20 rounded-2xl p-6 border border-green-500/30 hover:border-green-500/50 transition-all duration-300">
                               <h3 className="text-lg sm:text-xl font-bold mb-4 flex items-center gap-2 text-green-400">
                                 <Gift size={18} />
-                                Soul Rewards {contractData.tgeEnabled ? '(Available)' : '(Coming Soon)'}
+                                Soul Rewards Available
                               </h3>
                               <div className="text-center mb-6">
                                 <div className="text-2xl sm:text-3xl font-bold text-green-400 mb-2">
                                   {formatNumber(userInfo.claimable)} SOUL
                                 </div>
-                                <div className="text-sm text-pink-200">
-                                  {contractData.tgeEnabled ? 'Ready to claim your emotional rewards' : 'Token claims will be enabled soon'}
-                                </div>
+                                <div className="text-sm text-pink-200">Ready to claim your emotional rewards</div>
                               </div>
                               <button
                                 onClick={claimTokens}
-                                disabled={txLoading || !contractData.tgeEnabled || parseFloat(userInfo.claimable) === 0}
-                                className="w-full bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600 px-4 py-4 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all duration-300 hover:scale-105 disabled:opacity-50 disabled:hover:scale-100"
+                                disabled={txLoading}
+                                className="w-full bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600 px-4 py-4 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all duration-300 hover:scale-105"
                               >
                                 {txLoading ? <Loader className="animate-spin" size={18} /> : <Gift size={18} />}
-                                {txLoading ? 'Claiming...' : 
-                                 !contractData.tgeEnabled ? 'Claims Coming Soon' :
-                                 parseFloat(userInfo.claimable) === 0 ? 'No Tokens to Claim' :
-                                 'Claim Soul Rewards'}
+                                {txLoading ? 'Claiming...' : 'Claim Soul Rewards'}
                               </button>
                             </div>
                           )}
