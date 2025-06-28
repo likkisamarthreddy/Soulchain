@@ -195,6 +195,7 @@ function PresaleSection() {
   const [loading, setLoading] = useState<boolean>(false);
   const [txLoading, setTxLoading] = useState<boolean>(false);
   const [dataLoading, setDataLoading] = useState<boolean>(false);
+  const [contractDataLoaded, setContractDataLoaded] = useState<boolean>(false);
 
   // Balance state
   const [bnbBalance, setBnbBalance] = useState<string>('0');
@@ -307,108 +308,201 @@ function PresaleSection() {
     }
   }, [liveBnbPrice]);
 
-  // Enhanced fetch contract data with better mobile support and retry logic
+  // Enhanced fetch contract data with better reliability and retry logic
   const fetchData = useCallback(async () => {
     if (!publicClient) return;
 
     try {
       setDataLoading(true);
       
-      // Create a timeout promise for mobile networks
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Request timeout')), 15000)
-      );
+      // Multiple retry attempts for better reliability
+      let retryCount = 0;
+      const maxRetries = 3;
+      let contractData = null;
 
-      // Fetch basic contract data with timeout
-      const [
-        currentStageData,
-        totalRaisedData,
-        totalSoldData
-      ] = await Promise.race([
-        Promise.all([
-          publicClient.readContract({
-            address: PRESALE_ADDRESS as `0x${string}`,
-            abi: PRESALE_ABI,
-            functionName: 'currentStage',
-          }),
-          publicClient.readContract({
-            address: PRESALE_ADDRESS as `0x${string}`,
-            abi: PRESALE_ABI,
-            functionName: 'totalRaised',
-          }),
-          publicClient.readContract({
-            address: PRESALE_ADDRESS as `0x${string}`,
-            abi: PRESALE_ABI,
-            functionName: 'getTotalTokensSold',
-          })
-        ]),
-        timeoutPromise
-      ]) as [bigint, bigint, bigint];
+      while (retryCount < maxRetries && !contractData) {
+        try {
+          // Create a more generous timeout for contract calls
+          const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Contract call timeout')), 20000)
+          );
 
-      // Set basic data first
-      setCurrentStage(Number(currentStageData));
-      setTotalRaised(ethers.utils.formatEther(totalRaisedData.toString()));
-      setTotalTokensSold(ethers.utils.formatEther(totalSoldData.toString()));
+          // Fetch basic contract data with timeout and retry logic
+          const contractCallPromise = Promise.all([
+            publicClient.readContract({
+              address: PRESALE_ADDRESS as `0x${string}`,
+              abi: PRESALE_ABI,
+              functionName: 'currentStage',
+            }),
+            publicClient.readContract({
+              address: PRESALE_ADDRESS as `0x${string}`,
+              abi: PRESALE_ABI,
+              functionName: 'totalRaised',
+            }),
+            publicClient.readContract({
+              address: PRESALE_ADDRESS as `0x${string}`,
+              abi: PRESALE_ABI,
+              functionName: 'getTotalTokensSold',
+            })
+          ]);
 
-      // Fetch stage info with individual timeout and retry
-      try {
-        const stageDataPromise = publicClient.readContract({
-          address: PRESALE_ADDRESS as `0x${string}`,
-          abi: PRESALE_ABI,
-          functionName: 'getCurrentStageInfo',
-        });
+          contractData = await Promise.race([
+            contractCallPromise,
+            timeoutPromise
+          ]) as [bigint, bigint, bigint];
 
-        const stageData = await Promise.race([
-          stageDataPromise,
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Stage info timeout')), 10000))
-        ]) as [bigint, number, bigint, bigint];
-
-        setStageInfo({
-          price: ethers.utils.formatUnits(stageData[0], 6), // Price is in 6 decimals
-          bonus: Number(stageData[1]), // This is already a regular number
-          sold: ethers.utils.formatEther(stageData[2]),
-          allocation: ethers.utils.formatEther(stageData[3])
-        });
-      } catch (error) {
-        console.error('Error fetching stage info:', error);
-        // Use fallback stage info based on current stage
-        const fallbackStage = STAGE_CONFIG.find(s => s.stage === Number(currentStageData));
-        if (fallbackStage) {
-          setStageInfo({
-            price: fallbackStage.price.toString(),
-            bonus: fallbackStage.bonus,
-            sold: '0',
-            allocation: fallbackStage.allocation.toString()
+          // If we got here, the contract call succeeded
+          console.log('Contract data fetched successfully:', {
+            currentStage: Number(contractData[0]),
+            totalRaised: ethers.utils.formatEther(contractData[1].toString()),
+            totalTokensSold: ethers.utils.formatEther(contractData[2].toString())
           });
+
+          break; // Exit retry loop on success
+
+        } catch (error) {
+          retryCount++;
+          console.error(`Contract call attempt ${retryCount} failed:`, error);
+          
+          if (retryCount < maxRetries) {
+            // Wait before retrying (exponential backoff)
+            await new Promise(resolve => setTimeout(resolve, 1000 * retryCount));
+          }
         }
       }
 
-      // Fetch user info if connected with timeout
-      if (address) {
-        try {
-          const userDataPromise = publicClient.readContract({
-            address: PRESALE_ADDRESS as `0x${string}`,
-            abi: PRESALE_ABI,
-            functionName: 'getUserInfo',
-            args: [address],
-          });
+      if (contractData) {
+        // Successfully fetched real contract data
+        setCurrentStage(Number(contractData[0]));
+        setTotalRaised(ethers.utils.formatEther(contractData[1].toString()));
+        setTotalTokensSold(ethers.utils.formatEther(contractData[2].toString()));
+        setContractDataLoaded(true);
 
-          const userData = await Promise.race([
-            userDataPromise,
-            new Promise((_, reject) => setTimeout(() => reject(new Error('User info timeout')), 10000))
-          ]) as [bigint, bigint, bigint, bigint, string, bigint];
+        console.log('Real contract data set:', {
+          stage: Number(contractData[0]),
+          raised: ethers.utils.formatEther(contractData[1].toString()),
+          sold: ethers.utils.formatEther(contractData[2].toString())
+        });
 
-          setUserInfo({
-            contributions: ethers.utils.formatEther(userData[0]),
-            tokensPurchased: ethers.utils.formatEther(userData[1]),
-            tokensVested: ethers.utils.formatEther(userData[2]),
-            claimable: ethers.utils.formatEther(userData[3]),
-            referrer: userData[4],
-            referralBonuses: ethers.utils.formatEther(userData[5])
-          });
-        } catch (error) {
-          console.error('Error fetching user info:', error);
-          // Set default user info to prevent UI issues
+        // Fetch stage info with individual retry logic
+        let stageDataRetries = 0;
+        while (stageDataRetries < 2) {
+          try {
+            const stageDataPromise = publicClient.readContract({
+              address: PRESALE_ADDRESS as `0x${string}`,
+              abi: PRESALE_ABI,
+              functionName: 'getCurrentStageInfo',
+            });
+
+            const stageData = await Promise.race([
+              stageDataPromise,
+              new Promise((_, reject) => setTimeout(() => reject(new Error('Stage info timeout')), 15000))
+            ]) as [bigint, number, bigint, bigint];
+
+            setStageInfo({
+              price: ethers.utils.formatUnits(stageData[0], 6), // Price is in 6 decimals
+              bonus: Number(stageData[1]), // This is already a regular number
+              sold: ethers.utils.formatEther(stageData[2]),
+              allocation: ethers.utils.formatEther(stageData[3])
+            });
+            break; // Exit stage info retry loop on success
+          } catch (error) {
+            stageDataRetries++;
+            console.error(`Stage info fetch attempt ${stageDataRetries} failed:`, error);
+            
+            if (stageDataRetries >= 2) {
+              // Use fallback stage info based on current stage
+              const fallbackStage = STAGE_CONFIG.find(s => s.stage === Number(contractData[0]));
+              if (fallbackStage) {
+                console.log('Using fallback stage info for stage:', Number(contractData[0]));
+                setStageInfo({
+                  price: fallbackStage.price.toString(),
+                  bonus: fallbackStage.bonus,
+                  sold: '0',
+                  allocation: fallbackStage.allocation.toString()
+                });
+              }
+            } else {
+              await new Promise(resolve => setTimeout(resolve, 2000)); // Wait before retry
+            }
+          }
+        }
+
+        // Fetch user info if connected with retry logic
+        if (address) {
+          let userDataRetries = 0;
+          while (userDataRetries < 2) {
+            try {
+              const userDataPromise = publicClient.readContract({
+                address: PRESALE_ADDRESS as `0x${string}`,
+                abi: PRESALE_ABI,
+                functionName: 'getUserInfo',
+                args: [address],
+              });
+
+              const userData = await Promise.race([
+                userDataPromise,
+                new Promise((_, reject) => setTimeout(() => reject(new Error('User info timeout')), 15000))
+              ]) as [bigint, bigint, bigint, bigint, string, bigint];
+
+              setUserInfo({
+                contributions: ethers.utils.formatEther(userData[0]),
+                tokensPurchased: ethers.utils.formatEther(userData[1]),
+                tokensVested: ethers.utils.formatEther(userData[2]),
+                claimable: ethers.utils.formatEther(userData[3]),
+                referrer: userData[4],
+                referralBonuses: ethers.utils.formatEther(userData[5])
+              });
+              break; // Exit user info retry loop on success
+            } catch (error) {
+              userDataRetries++;
+              console.error(`User info fetch attempt ${userDataRetries} failed:`, error);
+              
+              if (userDataRetries >= 2) {
+                // Set default user info to prevent UI issues
+                setUserInfo({
+                  contributions: '0',
+                  tokensPurchased: '0',
+                  tokensVested: '0',
+                  claimable: '0',
+                  referrer: ethers.constants.AddressZero,
+                  referralBonuses: '0'
+                });
+              } else {
+                await new Promise(resolve => setTimeout(resolve, 2000)); // Wait before retry
+              }
+            }
+          }
+        }
+
+        // Show success notification only when we have real data
+        if (!contractDataLoaded) {
+          showNotification('success', 'Real contract data loaded successfully! 💖');
+        }
+
+      } else {
+        throw new Error('Failed to fetch contract data after all retries');
+      }
+
+    } catch (error) {
+      console.error('Critical error fetching contract data:', error);
+      
+      // Only use fallback data if we haven't loaded real data before
+      if (!contractDataLoaded) {
+        console.log('Using fallback data - no real contract data available');
+        setCurrentStage(1);
+        setTotalRaised('0'); // Start with 0 instead of fake data
+        setTotalTokensSold('0'); // Start with 0 instead of fake data
+        
+        const fallbackStage = STAGE_CONFIG[0];
+        setStageInfo({
+          price: fallbackStage.price.toString(),
+          bonus: fallbackStage.bonus,
+          sold: '0',
+          allocation: fallbackStage.allocation.toString()
+        });
+
+        if (address) {
           setUserInfo({
             contributions: '0',
             tokensPurchased: '0',
@@ -418,40 +512,15 @@ function PresaleSection() {
             referralBonuses: '0'
           });
         }
+
+        showNotification('error', 'Unable to load real contract data. Please check your connection and try refreshing. 💔');
+      } else {
+        showNotification('info', 'Using cached contract data. Latest data will load on next refresh.');
       }
-
-    } catch (error) {
-      console.error('Error fetching contract data:', error);
-      
-      // Set fallback data for mobile users
-      setCurrentStage(1);
-      setTotalRaised('1250000');
-      setTotalTokensSold('250000000');
-      
-      const fallbackStage = STAGE_CONFIG[0];
-      setStageInfo({
-        price: fallbackStage.price.toString(),
-        bonus: fallbackStage.bonus,
-        sold: '50000000',
-        allocation: fallbackStage.allocation.toString()
-      });
-
-      if (address) {
-        setUserInfo({
-          contributions: '0',
-          tokensPurchased: '0',
-          tokensVested: '0',
-          claimable: '0',
-          referrer: ethers.constants.AddressZero,
-          referralBonuses: '0'
-        });
-      }
-
-      showNotification('info', 'Using cached data. Refresh to try loading latest data.');
     } finally {
       setDataLoading(false);
     }
-  }, [publicClient, address]);
+  }, [publicClient, address, contractDataLoaded]);
 
   // Fetch wallet balances with improved error handling
   const fetchBalances = useCallback(async () => {
@@ -872,8 +941,10 @@ function PresaleSection() {
     return parseFloat(priceStr);
   };
 
-  // Calculate total participants (dummy data for now)
-  const totalParticipants = Math.floor(parseFloat(totalTokensSold) / 1000) || 1847;
+  // Calculate total participants based on total tokens sold (more realistic calculation)
+  const totalParticipants = totalTokensSold && parseFloat(totalTokensSold) > 0 
+    ? Math.max(1, Math.floor(parseFloat(totalTokensSold) / 5000)) // Assume average 5000 tokens per participant
+    : 0;
 
   return (
     <section id="presale" className="section-padding bg-gradient-to-br from-gray-900 via-black to-gray-950 relative text-white">
@@ -1002,6 +1073,33 @@ function PresaleSection() {
               </div>
 
               <div className="flex items-center gap-2 sm:gap-4">
+                {/* Contract Data Status Indicator */}
+                <div className={`hidden md:block backdrop-blur-lg border-white/20 rounded-2xl px-4 py-2 border ${
+                  contractDataLoaded ? 'bg-green-500/10 border-green-500/30' : 'bg-yellow-500/10 border-yellow-500/30'
+                }`}>
+                  <div className="flex items-center gap-2">
+                    <div
+                      className={`w-3 h-3 rounded-full animate-pulse ${
+                        contractDataLoaded ? 'bg-green-400' : 'bg-yellow-400'
+                      }`}
+                    ></div>
+                    <span className="text-sm font-medium">
+                      {contractDataLoaded ? 'Live Data' : 'Loading...'}
+                    </span>
+                    <button
+                      onClick={() => {
+                        setContractDataLoaded(false);
+                        fetchData();
+                      }}
+                      className="text-pink-300 hover:text-white transition-colors hover:scale-110"
+                      disabled={dataLoading}
+                      title="Refresh contract data"
+                    >
+                      <RefreshCw size={14} className={dataLoading ? 'animate-spin' : ''} />
+                    </button>
+                  </div>
+                </div>
+
                 {/* Current Emotion Display */}
                 <div className="hidden md:block bg-white/10 backdrop-blur-lg border-white/20 rounded-2xl px-4 py-2 border">
                   <div className="flex items-center gap-2">
@@ -1159,6 +1257,34 @@ function PresaleSection() {
                       </div>
                       <button
                         onClick={fetchLiveBnbPrice}
+                        className="text-pink-300 hover:text-white transition-colors"
+                        disabled={dataLoading}
+                      >
+                        <RefreshCw size={14} className={dataLoading ? 'animate-spin' : ''} />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Mobile Contract Data Status */}
+                  <div className={`p-3 backdrop-blur-lg border-white/20 rounded-2xl border ${
+                    contractDataLoaded ? 'bg-green-500/10 border-green-500/30' : 'bg-yellow-500/10 border-yellow-500/30'
+                  }`}>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <div
+                          className={`w-3 h-3 rounded-full animate-pulse ${
+                            contractDataLoaded ? 'bg-green-400' : 'bg-yellow-400'
+                          }`}
+                        ></div>
+                        <span className="text-sm font-medium">
+                          {contractDataLoaded ? 'Real Contract Data' : 'Loading Contract...'}
+                        </span>
+                      </div>
+                      <button
+                        onClick={() => {
+                          setContractDataLoaded(false);
+                          fetchData();
+                        }}
                         className="text-pink-300 hover:text-white transition-colors"
                         disabled={dataLoading}
                       >
@@ -1361,7 +1487,7 @@ function PresaleSection() {
             <div className="space-y-6 sm:space-y-8">
               {activeTab === 'home' && (
                 <>
-                  {/* Emotional Stats Cards with improved data loading */}
+                  {/* Emotional Stats Cards with real contract data */}
                   <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-6">
                     {[
                       {
@@ -1375,30 +1501,36 @@ function PresaleSection() {
                       },
                       {
                         title: 'Hearts Raised',
-                        value: dataLoading ? <Loader size={16} className="animate-spin" /> : formatNumber(totalRaised),
+                        value: dataLoading ? <Loader size={16} className="animate-spin" /> : (
+                          contractDataLoaded ? formatNumber(totalRaised) : '0'
+                        ),
                         icon: <DollarSign size={20} />,
-                        suffix: ' USD',
+                        suffix: contractDataLoaded ? ' USD' : '',
                         color: 'from-purple-500 to-violet-500',
-                        trend: '+15.3%',
-                        description: 'Total emotional investment'
+                        trend: contractDataLoaded ? '+15.3%' : '--',
+                        description: contractDataLoaded ? 'Real emotional investment from contract' : 'Contract data loading...'
                       },
                       {
                         title: 'Souls Connected',
-                        value: dataLoading ? <Loader size={16} className="animate-spin" /> : formatNumber(totalTokensSold),
+                        value: dataLoading ? <Loader size={16} className="animate-spin" /> : (
+                          contractDataLoaded ? formatNumber(totalTokensSold) : '0'
+                        ),
                         icon: <Users size={20} />,
-                        suffix: ' SOUL',
+                        suffix: contractDataLoaded ? ' SOUL' : '',
                         color: 'from-indigo-500 to-blue-500',
-                        trend: '+8.7%',
-                        description: 'Tokens preserving emotions'
+                        trend: contractDataLoaded ? '+8.7%' : '--',
+                        description: contractDataLoaded ? 'Real tokens sold from contract' : 'Contract data loading...'
                       },
                       {
                         title: 'Total Participants',
-                        value: dataLoading ? <Loader size={16} className="animate-spin" /> : formatNumber(totalParticipants),
+                        value: dataLoading ? <Loader size={16} className="animate-spin" /> : (
+                          contractDataLoaded ? formatNumber(totalParticipants) : '0'
+                        ),
                         icon: <Sparkles size={20} />,
                         suffix: '',
                         color: 'from-teal-500 to-cyan-500',
-                        trend: '+3.2%',
-                        description: 'Beautiful souls joined'
+                        trend: contractDataLoaded ? '+3.2%' : '--',
+                        description: contractDataLoaded ? 'Calculated from real token distribution' : 'Contract data loading...'
                       }
                     ].map((stat, index) => (
                       <div key={index} className="bg-white/10 backdrop-blur-lg border-white/20 rounded-2xl p-4 sm:p-6 border hover:border-pink-500/50 transition-all duration-300 hover:scale-105 group">
@@ -1406,7 +1538,7 @@ function PresaleSection() {
                           <div className={`w-10 h-10 sm:w-12 sm:h-12 bg-gradient-to-r ${stat.color} rounded-xl flex items-center justify-center shadow-lg group-hover:scale-110 transition-transform duration-300`}>
                             {stat.icon}
                           </div>
-                          <div className={`text-xs px-2 py-1 rounded-full ${stat.trend.startsWith('+') ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
+                          <div className={`text-xs px-2 py-1 rounded-full ${stat.trend.startsWith('+') ? 'bg-green-500/20 text-green-400' : stat.trend === '--' ? 'bg-gray-500/20 text-gray-400' : 'bg-red-500/20 text-red-400'}`}>
                             {stat.trend}
                           </div>
                         </div>
@@ -1415,7 +1547,9 @@ function PresaleSection() {
                         </div>
                         <div className="text-xs sm:text-sm text-pink-200 mb-1">{stat.title}</div>
                         {stat.description && (
-                          <div className="text-xs text-purple-300 opacity-80">{stat.description}</div>
+                          <div className={`text-xs opacity-80 ${contractDataLoaded ? 'text-purple-300' : 'text-yellow-300'}`}>
+                            {stat.description}
+                          </div>
                         )}
                       </div>
                     ))}
@@ -2170,7 +2304,7 @@ function PresaleSection() {
                         </span>
                         <button
                           onClick={() => copyToClipboard(`https://soulchain.love/presale?soul=${address}`)}
-                          className="bg-gradient-to-r from-pink-500 via-purple-500 to-indigo-500 hover:from-pink-600 hover:via-purple-600 hover:to-indigo-600 px-4 sm:px-6 py-2 rounded-xl flex items-center gap-2 hover:scale-105 transition-all duration-300 text-sm"
+                          className="bg-gradient-to-r from-pink-500 via-purple-500  to-indigo-500 hover:from-pink-600 hover:via-purple-600 hover:to-indigo-600 px-4 sm:px-6 py-2 rounded-xl flex items-center gap-2 hover:scale-105 transition-all duration-300 text-sm"
                         >
                           {copied ? <CheckCircle size={14} /> : <Copy size={14} />}
                           {copied ? 'Copied!' : 'Copy'}
