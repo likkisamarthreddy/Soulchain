@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { ethers } from 'ethers';
+import { useAccount, useConnect, useDisconnect, useWalletClient, usePublicClient, useSwitchChain } from 'wagmi';
+import { useWeb3Modal } from '@web3modal/wagmi/react';
+import { bsc } from 'wagmi/chains';
 import {
   Heart,
   TrendingUp,
@@ -70,13 +73,6 @@ import {
   Gem
 } from 'lucide-react';
 
-// Declare global ethereum interface
-declare global {
-  interface Window {
-    ethereum?: any;
-  }
-}
-
 // Contract ABIs
 const PRESALE_ABI = [
   "function buyWithBNB(address referrer) external payable",
@@ -107,19 +103,6 @@ const ERC20_ABI = [
 const PRESALE_ADDRESS = "0x109351D517BB66135b450Ed9039bD66fCd92278d";
 const SOUL_TOKEN_ADDRESS = "0x34B0D9C19177A5E6B145C66FF7660047C26Bc1cc";
 const USDT_ADDRESS = "0x55d398326f99059fF775485246999027B3197955"; // BSC Mainnet USDT
-
-// BSC Mainnet configuration
-const BSC_MAINNET = {
-  chainId: '0x38', // 56 in decimal
-  chainName: 'BNB Smart Chain',
-  nativeCurrency: {
-    name: 'BNB',
-    symbol: 'BNB',
-    decimals: 18,
-  },
-  rpcUrls: ['https://bsc-dataseed1.binance.org/', 'https://bsc-dataseed2.binance.org/', 'https://bsc-dataseed3.binance.org/'],
-  blockExplorerUrls: ['https://bscscan.com/'],
-};
 
 // Interfaces
 interface StageInfo {
@@ -177,14 +160,6 @@ const STAGE_CONFIG = [
 
 const LISTING_PRICE = 0.1;
 
-// Wallet types
-const WALLET_TYPES = {
-  METAMASK: 'metamask',
-  TRUST_WALLET: 'trustwallet',
-  COINBASE: 'coinbase',
-  WALLETCONNECT: 'walletconnect'
-};
-
 // Quick amounts
 const BNB_AMOUNTS = [0.1, 1, 2, 5];
 const USDT_AMOUNTS = [10, 100, 500, 1000];
@@ -201,12 +176,21 @@ const EMOTIONAL_MOMENTS: EmotionalMoment[] = [
   { id: '8', emotion: 'Sweet Nostalgia', intensity: 88, timestamp: Date.now() - 7000, description: 'Cherished memories of the past', category: 'nostalgia', color: '#DEB887' },
 ];
 
+// Mobile detection utility
+const isMobile = () => {
+  return /Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+};
+
 function PresaleSection() {
+  // Wagmi hooks
+  const { address, isConnected, chain } = useAccount();
+  const { data: walletClient } = useWalletClient();
+  const publicClient = usePublicClient();
+  const { disconnect } = useDisconnect();
+  const { switchChain } = useSwitchChain();
+  const { open } = useWeb3Modal();
+
   // Core state
-  const [account, setAccount] = useState<string>('');
-  const [provider, setProvider] = useState<ethers.providers.Web3Provider | null>(null);
-  const [signer, setSigner] = useState<ethers.providers.JsonRpcSigner | null>(null);
-  const [presaleContract, setPresaleContract] = useState<ethers.Contract | null>(null);
   const [currentStage, setCurrentStage] = useState<number>(1);
   const [stageInfo, setStageInfo] = useState<StageInfo | null>(null);
   const [userInfo, setUserInfo] = useState<UserInfo | null>(null);
@@ -226,7 +210,6 @@ function PresaleSection() {
   const [notification, setNotification] = useState<{type: 'success' | 'error' | 'info', message: string} | null>(null);
   const [copied, setCopied] = useState<boolean>(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
-  const [walletModalOpen, setWalletModalOpen] = useState<boolean>(false);
 
   // Purchase state
   const [buyAmount, setBuyAmount] = useState<string>('');
@@ -246,13 +229,36 @@ function PresaleSection() {
   // Emotional state
   const [currentEmotion, setCurrentEmotion] = useState<EmotionalMoment>(EMOTIONAL_MOMENTS[0]);
 
-  // Wallet detection
-  const detectWalletType = () => {
-    if (window.ethereum?.isTrust) return WALLET_TYPES.TRUST_WALLET;
-    if (window.ethereum?.isCoinbaseWallet) return WALLET_TYPES.COINBASE;
-    if (window.ethereum?.isMetaMask) return WALLET_TYPES.METAMASK;
-    return WALLET_TYPES.METAMASK; // Default
-  };
+  // Contract instances
+  const [presaleContract, setPresaleContract] = useState<ethers.Contract | null>(null);
+
+  // Initialize contract when wallet is connected
+  useEffect(() => {
+    if (isConnected && walletClient && address) {
+      const signer = new ethers.providers.Web3Provider(walletClient.transport).getSigner();
+      const contract = new ethers.Contract(PRESALE_ADDRESS, PRESALE_ABI, signer);
+      setPresaleContract(contract);
+
+      // Load saved transactions
+      const savedTxs = localStorage.getItem(`transactions_${address}`);
+      if (savedTxs) {
+        setTransactions(JSON.parse(savedTxs));
+      }
+    } else {
+      setPresaleContract(null);
+      setUserInfo(null);
+      setTransactions([]);
+      setBnbBalance('0');
+      setUsdtBalance('0');
+    }
+  }, [isConnected, walletClient, address]);
+
+  // Auto-switch to BSC if on wrong network
+  useEffect(() => {
+    if (isConnected && chain && chain.id !== bsc.id) {
+      switchChain({ chainId: bsc.id });
+    }
+  }, [isConnected, chain, switchChain]);
 
   // Fetch live BNB price
   const fetchLiveBnbPrice = useCallback(async () => {
@@ -269,25 +275,29 @@ function PresaleSection() {
 
   // Fetch wallet balances
   const fetchBalances = useCallback(async () => {
-    if (!provider || !account) return;
+    if (!publicClient || !address) return;
 
     try {
       setBalanceLoading(true);
       
       // Get BNB balance
-      const bnbBalance = await provider.getBalance(account);
-      setBnbBalance(ethers.utils.formatEther(bnbBalance));
+      const bnbBalance = await publicClient.getBalance({ address });
+      setBnbBalance(ethers.utils.formatEther(bnbBalance.toString()));
 
       // Get USDT balance
-      const usdtContract = new ethers.Contract(USDT_ADDRESS, ERC20_ABI, provider);
-      const usdtBalance = await usdtContract.balanceOf(account);
-      setUsdtBalance(ethers.utils.formatUnits(usdtBalance, 18)); // USDT on BSC has 18 decimals
+      const usdtBalance = await publicClient.readContract({
+        address: USDT_ADDRESS as `0x${string}`,
+        abi: ERC20_ABI,
+        functionName: 'balanceOf',
+        args: [address],
+      });
+      setUsdtBalance(ethers.utils.formatUnits(usdtBalance.toString(), 18));
     } catch (error) {
       console.error('Error fetching balances:', error);
     } finally {
       setBalanceLoading(false);
     }
-  }, [provider, account]);
+  }, [publicClient, address]);
 
   // Utility functions
   const showNotification = (type: 'success' | 'error' | 'info', message: string) => {
@@ -417,146 +427,27 @@ function PresaleSection() {
   }, []);
 
   // Wallet connection functions
-  const switchToBSCMainnet = async () => {
-    if (!window.ethereum) return;
-
-    try {
-      await window.ethereum.request({
-        method: 'wallet_switchEthereumChain',
-        params: [{ chainId: BSC_MAINNET.chainId }],
-      });
-    } catch (switchError: any) {
-      if (switchError.code === 4902) {
-        try {
-          await window.ethereum.request({
-            method: 'wallet_addEthereumChain',
-            params: [BSC_MAINNET],
-          });
-        } catch (addError) {
-          console.error('Error adding BSC Mainnet:', addError);
-          throw addError;
-        }
-      } else {
-        throw switchError;
-      }
-    }
-  };
-
-  // Auto-connect to BSC Mainnet on page load
-  useEffect(() => {
-    const autoConnectToBSC = async () => {
-      if (window.ethereum) {
-        try {
-          const web3Provider = new ethers.providers.Web3Provider(window.ethereum);
-          const network = await web3Provider.getNetwork();
-
-          // If not on BSC Mainnet, auto-switch
-          if (network.chainId !== 56) {
-            await switchToBSCMainnet();
-          }
-        } catch (error) {
-          console.log('Auto-switch to BSC Mainnet failed:', error);
-        }
-      }
-    };
-
-    autoConnectToBSC();
-  }, []);
-
-  const connectWallet = async (walletType?: string) => {
-    if (!window.ethereum) {
-      showNotification('error', 'Please install MetaMask or another Web3 wallet to connect! 💔');
-      setWalletModalOpen(false);
-      return;
-    }
-
+  const connectWallet = async () => {
     try {
       setLoading(true);
-      await switchToBSCMainnet();
-
-      const accounts = await window.ethereum.request({
-        method: 'eth_requestAccounts'
-      });
-
-      const web3Provider = new ethers.providers.Web3Provider(window.ethereum);
-      const web3Signer = web3Provider.getSigner();
-      const network = await web3Provider.getNetwork();
-
-      if (network.chainId !== 56) {
-        showNotification('error', 'Please switch to BSC Mainnet to join the emotional revolution! 🌟');
-        setLoading(false);
-        return;
-      }
-
-      setAccount(accounts[0]);
-      setProvider(web3Provider);
-      setSigner(web3Signer);
-
-      const contract = new ethers.Contract(PRESALE_ADDRESS, PRESALE_ABI, web3Signer);
-      setPresaleContract(contract);
-
-      const walletName = walletType || detectWalletType();
-      showNotification('success', `Welcome to SoulChain! Your ${walletName} wallet is connected! 💖✨`);
-
-      const savedTxs = localStorage.getItem(`transactions_${accounts[0]}`);
-      if (savedTxs) {
-        setTransactions(JSON.parse(savedTxs));
-      }
-
-      setWalletModalOpen(false);
+      await open();
+      showNotification('success', 'Welcome to SoulChain! Your wallet is connected! 💖✨');
     } catch (error: any) {
       console.error('Connection error:', error);
-
-      // Handle specific error cases
-      if (error.code === 4001) {
-        showNotification('error', 'Connection cancelled. Your soul awaits when you\'re ready! 💫');
-      } else if (error.code === -32002) {
-        showNotification('error', 'Please check your wallet - a connection request is already pending! 🔄');
-      } else {
-        showNotification('error', `Connection failed: ${error.message || 'Unknown error'} 💔`);
-      }
-
-      setWalletModalOpen(false);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const switchAccount = async () => {
-    if (!window.ethereum) return;
-
-    try {
-      setLoading(true);
-      await window.ethereum.request({
-        method: 'wallet_requestAccounts'
-      });
-
-      await connectWallet();
-    } catch (error: any) {
-      console.error('Switch account error:', error);
-      if (error.code === 4001) {
-        showNotification('info', 'Account switch cancelled 💫');
-      }
+      showNotification('error', `Connection failed: ${error.message || 'Unknown error'} 💔`);
     } finally {
       setLoading(false);
     }
   };
 
   const disconnectWallet = () => {
-    setAccount('');
-    setProvider(null);
-    setSigner(null);
-    setPresaleContract(null);
-    setUserInfo(null);
-    setTransactions([]);
-    setBnbBalance('0');
-    setUsdtBalance('0');
+    disconnect();
     showNotification('info', 'Until we meet again, beautiful soul! 💫');
   };
 
   // Fetch contract data
   const fetchData = useCallback(async () => {
-    if (!presaleContract || !account) return;
+    if (!presaleContract || !address) return;
 
     try {
       const [
@@ -567,7 +458,7 @@ function PresaleSection() {
         currentStageData
       ] = await Promise.all([
         presaleContract.getCurrentStageInfo(),
-        presaleContract.getUserInfo(account),
+        presaleContract.getUserInfo(address),
         presaleContract.totalRaised(),
         presaleContract.getTotalTokensSold(),
         presaleContract.currentStage()
@@ -597,10 +488,10 @@ function PresaleSection() {
       console.error('Error fetching contract data:', error);
       showNotification('error', 'Failed to fetch contract data. Please try again.');
     }
-  }, [presaleContract, account]);
+  }, [presaleContract, address]);
 
   const buyTokens = async () => {
-    if (!presaleContract || !signer || !buyAmount) return;
+    if (!presaleContract || !walletClient || !buyAmount) return;
 
     try {
       setTxLoading(true);
@@ -619,8 +510,10 @@ function PresaleSection() {
           gasLimit: gasLimit
         });
       } else {
+        const provider = new ethers.providers.Web3Provider(walletClient.transport);
+        const signer = provider.getSigner();
         const usdtContract = new ethers.Contract(USDT_ADDRESS, ERC20_ABI, signer);
-        const allowance = await usdtContract.allowance(account, PRESALE_ADDRESS);
+        const allowance = await usdtContract.allowance(address, PRESALE_ADDRESS);
         const usdtAmount = ethers.utils.parseUnits(buyAmount, 18); // USDT on BSC has 18 decimals
 
         if (allowance.lt(usdtAmount)) {
@@ -655,7 +548,7 @@ function PresaleSection() {
 
       const updatedTxs = [newTx, ...transactions];
       setTransactions(updatedTxs);
-      localStorage.setItem(`transactions_${account}`, JSON.stringify(updatedTxs));
+      localStorage.setItem(`transactions_${address}`, JSON.stringify(updatedTxs));
 
       showNotification('info', 'Your emotional investment is being processed... 💫');
       await tx.wait();
@@ -664,7 +557,7 @@ function PresaleSection() {
         t.id === newTx.id ? { ...t, status: 'completed' as const } : t
       );
       setTransactions(confirmedTxs);
-      localStorage.setItem(`transactions_${account}`, JSON.stringify(confirmedTxs));
+      localStorage.setItem(`transactions_${address}`, JSON.stringify(confirmedTxs));
 
       showNotification('success', `🎉 Welcome to the emotional revolution! You've acquired ${calculatedTokens} SOUL tokens! 💖`);
       setBuyAmount('');
@@ -690,7 +583,7 @@ function PresaleSection() {
         t.hash === (error.transaction?.hash) ? { ...t, status: 'failed' as const } : t
       );
       setTransactions(failedTxs);
-      localStorage.setItem(`transactions_${account}`, JSON.stringify(failedTxs));
+      localStorage.setItem(`transactions_${address}`, JSON.stringify(failedTxs));
     } finally {
       setTxLoading(false);
     }
@@ -726,7 +619,7 @@ function PresaleSection() {
         t.id === newTx.id ? { ...t, status: 'completed' as const } : t
       );
       setTransactions(confirmedTxs);
-      localStorage.setItem(`transactions_${account}`, JSON.stringify(confirmedTxs));
+      localStorage.setItem(`transactions_${address}`, JSON.stringify(confirmedTxs));
 
       showNotification('success', 'Your SOUL tokens have been claimed! Feel the emotional power! ✨💖');
       await fetchData();
@@ -768,7 +661,7 @@ function PresaleSection() {
     );
 
   useEffect(() => {
-    if (account && presaleContract) {
+    if (address && presaleContract) {
       fetchData();
       fetchBalances();
       const interval = setInterval(() => {
@@ -777,7 +670,7 @@ function PresaleSection() {
       }, 10000);
       return () => clearInterval(interval);
     }
-  }, [account, presaleContract, fetchData, fetchBalances]);
+  }, [address, presaleContract, fetchData, fetchBalances]);
 
   useEffect(() => {
     fetchLiveBnbPrice();
@@ -794,93 +687,8 @@ function PresaleSection() {
     return parseFloat(priceStr);
   };
 
-  // Wallet Modal Component
-  const WalletModal = () => (
-    walletModalOpen && (
-      <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-        <div className="bg-white/10 backdrop-blur-xl border border-white/20 rounded-3xl p-6 sm:p-8 max-w-md w-full">
-          <div className="flex items-center justify-between mb-6">
-            <h3 className="text-xl font-bold text-pink-100">Connect Your Soul</h3>
-            <button
-              onClick={() => setWalletModalOpen(false)}
-              className="text-pink-300 hover:text-white transition-colors"
-            >
-              <X size={20} />
-            </button>
-          </div>
-
-          <div className="space-y-3">
-            <button
-              onClick={() => connectWallet(WALLET_TYPES.METAMASK)}
-              disabled={loading}
-              className="w-full bg-white/10 backdrop-blur-lg border-white/20 hover:border-pink-500/50 border p-4 rounded-2xl flex items-center gap-4 transition-all duration-300 hover:scale-105 disabled:opacity-50"
-            >
-              <div className="w-8 h-8 bg-orange-500 rounded-full flex items-center justify-center">
-                <Wallet size={16} className="text-white" />
-              </div>
-              <div className="text-left">
-                <div className="font-bold text-white">MetaMask</div>
-                <div className="text-xs text-pink-200">Connect using MetaMask wallet</div>
-              </div>
-            </button>
-
-            <button
-              onClick={() => connectWallet(WALLET_TYPES.TRUST_WALLET)}
-              disabled={loading}
-              className="w-full bg-white/10 backdrop-blur-lg border-white/20 hover:border-pink-500/50 border p-4 rounded-2xl flex items-center gap-4 transition-all duration-300 hover:scale-105 disabled:opacity-50"
-            >
-              <div className="w-8 h-8 bg-blue-500 rounded-full flex items-center justify-center">
-                <Shield size={16} className="text-white" />
-              </div>
-              <div className="text-left">
-                <div className="font-bold text-white">Trust Wallet</div>
-                <div className="text-xs text-pink-200">Connect using Trust Wallet</div>
-              </div>
-            </button>
-
-            <button
-              onClick={() => connectWallet(WALLET_TYPES.COINBASE)}
-              disabled={loading}
-              className="w-full bg-white/10 backdrop-blur-lg border-white/20 hover:border-pink-500/50 border p-4 rounded-2xl flex items-center gap-4 transition-all duration-300 hover:scale-105 disabled:opacity-50"
-            >
-              <div className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center">
-                <Globe size={16} className="text-white" />
-              </div>
-              <div className="text-left">
-                <div className="font-bold text-white">Coinbase Wallet</div>
-                <div className="text-xs text-pink-200">Connect using Coinbase Wallet</div>
-              </div>
-            </button>
-
-            <button
-              onClick={() => connectWallet(WALLET_TYPES.WALLETCONNECT)}
-              disabled={loading}
-              className="w-full bg-white/10 backdrop-blur-lg border-white/20 hover:border-pink-500/50 border p-4 rounded-2xl flex items-center gap-4 transition-all duration-300 hover:scale-105 disabled:opacity-50"
-            >
-              <div className="w-8 h-8 bg-purple-500 rounded-full flex items-center justify-center">
-                <Smartphone size={16} className="text-white" />
-              </div>
-              <div className="text-left">
-                <div className="font-bold text-white">WalletConnect</div>
-                <div className="text-xs text-pink-200">Connect using mobile wallet</div>
-              </div>
-            </button>
-          </div>
-
-          {loading && (
-            <div className="mt-6 text-center">
-              <div className="flex items-center justify-center gap-2 text-pink-200">
-                <Loader className="animate-spin" size={16} />
-                <span className="text-sm">Connecting your soul...</span>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-    )
-  );
-
   return (
+    <section id="presale" className="section-padding bg-gradient-to-br from-gray-900 via-black to-gray-950 relative text-white">
     <div className="min-h-screen bg-gradient-to-br from-purple-900 via-pink-900 to-indigo-900 text-white transition-all duration-500 relative overflow-hidden">
       {/* Custom CSS for hiding input arrows and animations */}
       <style>{`
@@ -971,9 +779,6 @@ function PresaleSection() {
         ))}
       </div>
 
-      {/* Wallet Modal */}
-      <WalletModal />
-
       {/* Notification */}
       {notification && (
         <div className={`fixed top-4 right-4 z-50 p-4 rounded-2xl shadow-2xl backdrop-blur-lg border max-w-sm transform transition-all duration-300 ${
@@ -1035,16 +840,16 @@ function PresaleSection() {
                   </div>
                 </div>
 
-                {account ? (
+                {isConnected && address ? (
                   <div className="flex items-center gap-2">
                     <div className="bg-white/10 backdrop-blur-lg border-white/20 rounded-2xl px-3 py-2 border">
                       <div className="flex items-center gap-2">
                         <div className="w-3 h-3 bg-green-400 rounded-full animate-pulse"></div>
                         <span className="font-mono text-xs sm:text-sm">
-                          {formatAddress(account)}
+                          {formatAddress(address)}
                         </span>
                         <button
-                          onClick={() => copyToClipboard(account)}
+                          onClick={() => copyToClipboard(address)}
                           className="text-pink-300 hover:text-white transition-colors hover:scale-110"
                         >
                           {copied ? <CheckCircle size={14} /> : <Copy size={14} />}
@@ -1053,7 +858,7 @@ function PresaleSection() {
                     </div>
 
                     <button
-                      onClick={switchAccount}
+                      onClick={() => open()}
                       disabled={loading}
                       className="bg-white/10 backdrop-blur-lg border-white/20 px-2 py-2 rounded-2xl hover:scale-105 transition-all duration-300 border disabled:opacity-50"
                       title="Switch Account"
@@ -1071,7 +876,7 @@ function PresaleSection() {
                   </div>
                 ) : (
                   <button
-                    onClick={() => setWalletModalOpen(true)}
+                    onClick={connectWallet}
                     disabled={loading}
                     className="bg-gradient-to-r from-pink-500 via-purple-500 to-indigo-500 hover:from-pink-600 hover:via-purple-600 hover:to-indigo-600 px-4 py-2 sm:px-6 sm:py-3 rounded-2xl font-semibold flex items-center gap-2 transition-all duration-300 shadow-2xl shadow-pink-500/25 disabled:opacity-50 hover:scale-105 text-sm"
                   >
@@ -1095,7 +900,7 @@ function PresaleSection() {
             </div>
 
             {/* Mobile Navigation */}
-            {mobileMenuOpen && account && (
+            {mobileMenuOpen && isConnected && (
               <div className="lg:hidden mt-4 p-4 bg-white/10 backdrop-blur-lg rounded-2xl border-white/20 border">
                 <div className="grid grid-cols-2 gap-2">
                   <NavItem
@@ -1164,7 +969,7 @@ function PresaleSection() {
         </header>
 
         {/* Navigation Tabs - Desktop */}
-        {account && (
+        {isConnected && (
           <div className="hidden lg:block backdrop-blur-xl bg-white/5 border-b border-white/20">
             <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
               <div className="flex items-center gap-4">
@@ -1217,7 +1022,7 @@ function PresaleSection() {
 
         {/* Main Content */}
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 sm:py-8">
-          {!account ? (
+          {!isConnected ? (
             /* Welcome Section */
             <div className="text-center py-10 sm:py-20">
               <div className="mb-8 sm:mb-12">
@@ -1295,7 +1100,7 @@ function PresaleSection() {
 
               <div className="flex flex-col sm:flex-row items-center justify-center gap-4 sm:gap-6 px-4">
                 <button
-                  onClick={() => setWalletModalOpen(true)}
+                  onClick={connectWallet}
                   disabled={loading}
                   className="w-full sm:w-auto bg-gradient-to-r from-pink-500 via-purple-500 to-indigo-500 hover:from-pink-600 hover:via-purple-600 hover:to-indigo-600 px-12 sm:px-16 py-4 sm:py-6 rounded-2xl font-bold text-lg sm:text-xl flex items-center justify-center gap-3 sm:gap-4 transition-all duration-300 shadow-2xl shadow-pink-500/25 hover:shadow-pink-500/40 disabled:opacity-50 hover:scale-105"
                 >
@@ -1764,10 +1569,10 @@ function PresaleSection() {
                               <div className="text-sm text-pink-200 mb-2">Your Soul Address:</div>
                               <div className="bg-white/10 border-white/20 text-white placeholder-pink-300 rounded-2xl p-3 flex items-center justify-between border">
                                 <span className="font-mono text-xs truncate flex-1 mr-2">
-                                  {account}
+                                  {address}
                                 </span>
                                 <button
-                                  onClick={() => copyToClipboard(account)}
+                                  onClick={() => copyToClipboard(address!)}
                                   className="text-pink-400 hover:text-pink-300 transition-colors hover:scale-110"
                                 >
                                   {copied ? <CheckCircle size={16} /> : <Copy size={16} />}
@@ -1963,7 +1768,7 @@ function PresaleSection() {
                           const url = URL.createObjectURL(blob);
                           const a = document.createElement('a');
                           a.href = url;
-                          a.download = `soulchain-journey-${account.slice(0, 6)}.json`;
+                          a.download = `soulchain-journey-${address?.slice(0, 6)}.json`;
                           a.click();
                         }}
                         className="bg-white/10 backdrop-blur-lg border-white/20 px-4 py-2 rounded-2xl flex items-center gap-2 hover:scale-105 transition-all duration-300 border text-sm hover:border-pink-500/50"
@@ -2157,10 +1962,10 @@ function PresaleSection() {
                     <div className="mb-6">
                       <div className="bg-white/10 border-white/20 text-white placeholder-pink-300 rounded-2xl p-3 sm:p-4 flex items-center justify-between border">
                         <span className="font-mono text-xs sm:text-sm truncate flex-1 mr-4">
-                          {`https://soulchain.love/presale?soul=${account}`}
+                          {`https://soulchain.love/presale?soul=${address}`}
                         </span>
                         <button
-                          onClick={() => copyToClipboard(`https://soulchain.love/presale?soul=${account}`)}
+                          onClick={() => copyToClipboard(`https://soulchain.love/presale?soul=${address}`)}
                           className="bg-gradient-to-r from-pink-500 via-purple-500 to-indigo-500 hover:from-pink-600 hover:via-purple-600 hover:to-indigo-600 px-4 sm:px-6 py-2 rounded-xl flex items-center gap-2 hover:scale-105 transition-all duration-300 text-sm"
                         >
                           {copied ? <CheckCircle size={14} /> : <Copy size={14} />}
@@ -2344,7 +2149,7 @@ function PresaleSection() {
               {activeTab === 'emotions' && (
                 <div className="space-y-6 sm:space-y-8">
                   <div className="text-center">
-                    <h2 className="text-2xl sm:text-3xl font-bold mb-4 bg-gradient-to-r from-pink-400 to-purple-400 bg-clip-text text-transparent">Emotion Archive</h2>
+                    <h2 className="text-2xl sm: text-3xl font-bold mb-4 bg-gradient-to-r from-pink-400 to-purple-400 bg-clip-text text-transparent">Emotion Archive</h2>
                     <p className="text-pink-200 max-w-2xl mx-auto text-sm sm:text-base">
                       Explore the collective emotional archive of humanity. Every feeling preserved forever on the blockchain. 💖✨
                     </p>
@@ -2456,6 +2261,7 @@ function PresaleSection() {
         </main>
       </div>
     </div>
+    </section>
   );
 }
 
