@@ -1,8 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { ethers } from 'ethers';
-import { useAccount, useConnect, useDisconnect, useWalletClient, usePublicClient, useSwitchChain } from 'wagmi';
-import { useWeb3Modal } from '@web3modal/wagmi/react';
-import { bsc } from 'wagmi/chains';
 import {
   Heart,
   TrendingUp,
@@ -73,6 +70,13 @@ import {
   Gem
 } from 'lucide-react';
 
+// Declare global ethereum interface
+declare global {
+  interface Window {
+    ethereum?: any;
+  }
+}
+
 // Contract ABIs
 const PRESALE_ABI = [
   "function buyWithBNB(address referrer) external payable",
@@ -103,6 +107,19 @@ const ERC20_ABI = [
 const PRESALE_ADDRESS = "0x109351D517BB66135b450Ed9039bD66fCd92278d";
 const SOUL_TOKEN_ADDRESS = "0x34B0D9C19177A5E6B145C66FF7660047C26Bc1cc";
 const USDT_ADDRESS = "0x55d398326f99059fF775485246999027B3197955"; // BSC Mainnet USDT
+
+// BSC Mainnet configuration
+const BSC_MAINNET = {
+  chainId: '0x38', // 56 in decimal
+  chainName: 'BNB Smart Chain',
+  nativeCurrency: {
+    name: 'BNB',
+    symbol: 'BNB',
+    decimals: 18,
+  },
+  rpcUrls: ['https://bsc-dataseed1.binance.org/', 'https://bsc-dataseed2.binance.org/', 'https://bsc-dataseed3.binance.org/'],
+  blockExplorerUrls: ['https://bscscan.com/'],
+};
 
 // Interfaces
 interface StageInfo {
@@ -160,6 +177,14 @@ const STAGE_CONFIG = [
 
 const LISTING_PRICE = 0.1;
 
+// Wallet types
+const WALLET_TYPES = {
+  METAMASK: 'metamask',
+  TRUST_WALLET: 'trustwallet',
+  COINBASE: 'coinbase',
+  WALLETCONNECT: 'walletconnect'
+};
+
 // Quick amounts
 const BNB_AMOUNTS = [0.1, 1, 2, 5];
 const USDT_AMOUNTS = [10, 100, 500, 1000];
@@ -177,15 +202,11 @@ const EMOTIONAL_MOMENTS: EmotionalMoment[] = [
 ];
 
 function PresaleSection() {
-  // Wagmi hooks
-  const { address, isConnected, chain } = useAccount();
-  const { data: walletClient } = useWalletClient();
-  const publicClient = usePublicClient();
-  const { disconnect } = useDisconnect();
-  const { switchChain } = useSwitchChain();
-  const { open } = useWeb3Modal();
-
   // Core state
+  const [account, setAccount] = useState<string>('');
+  const [provider, setProvider] = useState<ethers.providers.Web3Provider | null>(null);
+  const [signer, setSigner] = useState<ethers.providers.JsonRpcSigner | null>(null);
+  const [presaleContract, setPresaleContract] = useState<ethers.Contract | null>(null);
   const [currentStage, setCurrentStage] = useState<number>(1);
   const [stageInfo, setStageInfo] = useState<StageInfo | null>(null);
   const [userInfo, setUserInfo] = useState<UserInfo | null>(null);
@@ -194,7 +215,6 @@ function PresaleSection() {
   const [liveBnbPrice, setLiveBnbPrice] = useState<number>(666);
   const [loading, setLoading] = useState<boolean>(false);
   const [txLoading, setTxLoading] = useState<boolean>(false);
-  const [dataLoading, setDataLoading] = useState<boolean>(false);
 
   // Balance state
   const [bnbBalance, setBnbBalance] = useState<string>('0');
@@ -206,6 +226,7 @@ function PresaleSection() {
   const [notification, setNotification] = useState<{type: 'success' | 'error' | 'info', message: string} | null>(null);
   const [copied, setCopied] = useState<boolean>(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
+  const [walletModalOpen, setWalletModalOpen] = useState<boolean>(false);
 
   // Purchase state
   const [buyAmount, setBuyAmount] = useState<string>('');
@@ -225,283 +246,48 @@ function PresaleSection() {
   // Emotional state
   const [currentEmotion, setCurrentEmotion] = useState<EmotionalMoment>(EMOTIONAL_MOMENTS[0]);
 
-  // Contract instances
-  const [presaleContract, setPresaleContract] = useState<ethers.Contract | null>(null);
+  // Wallet detection
+  const detectWalletType = () => {
+    if (window.ethereum?.isTrust) return WALLET_TYPES.TRUST_WALLET;
+    if (window.ethereum?.isCoinbaseWallet) return WALLET_TYPES.COINBASE;
+    if (window.ethereum?.isMetaMask) return WALLET_TYPES.METAMASK;
+    return WALLET_TYPES.METAMASK; // Default
+  };
 
-  // Initialize contract when wallet is connected
-  useEffect(() => {
-    if (isConnected && walletClient && address) {
-      try {
-        const signer = new ethers.providers.Web3Provider(walletClient.transport).getSigner();
-        const contract = new ethers.Contract(PRESALE_ADDRESS, PRESALE_ABI, signer);
-        setPresaleContract(contract);
-
-        // Load saved transactions
-        const savedTxs = localStorage.getItem(`transactions_${address}`);
-        if (savedTxs) {
-          try {
-            setTransactions(JSON.parse(savedTxs));
-          } catch (error) {
-            console.error('Error parsing saved transactions:', error);
-            setTransactions([]);
-          }
-        }
-      } catch (error) {
-        console.error('Error initializing contract:', error);
-        showNotification('error', 'Failed to initialize contract. Please refresh the page.');
-      }
-    } else {
-      setPresaleContract(null);
-      setUserInfo(null);
-      setTransactions([]);
-      setBnbBalance('0');
-      setUsdtBalance('0');
-    }
-  }, [isConnected, walletClient, address]);
-
-  // Auto-switch to BSC if on wrong network
-  useEffect(() => {
-    if (isConnected && chain && chain.id !== bsc.id && switchChain) {
-      switchChain({ chainId: bsc.id }).catch((error) => {
-        console.error('Error switching to BSC:', error);
-        showNotification('error', 'Please switch to BSC network manually');
-      });
-    }
-  }, [isConnected, chain, switchChain]);
-
-  // Fetch live BNB price with error handling
+  // Fetch live BNB price
   const fetchLiveBnbPrice = useCallback(async () => {
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
-
-      const response = await fetch(
-        'https://api.coingecko.com/api/v3/simple/price?ids=binancecoin&vs_currencies=usd',
-        { 
-          signal: controller.signal,
-          headers: {
-            'Accept': 'application/json',
-          }
-        }
-      );
-      
-      clearTimeout(timeoutId);
-      
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      
+      const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=binancecoin&vs_currencies=usd');
       const data = await response.json();
-      if (data.binancecoin && data.binancecoin.usd && typeof data.binancecoin.usd === 'number') {
+      if (data.binancecoin && data.binancecoin.usd) {
         setLiveBnbPrice(data.binancecoin.usd);
-      } else {
-        throw new Error('Invalid API response format');
       }
     } catch (error) {
       console.error('Error fetching BNB price:', error);
-      // Keep current price if fetch fails
-      if (liveBnbPrice === 666) {
-        // Set a reasonable fallback price if we never got a real price
-        setLiveBnbPrice(600);
-      }
     }
-  }, [liveBnbPrice]);
+  }, []);
 
-  // Enhanced fetch contract data with better mobile support and retry logic
-  const fetchData = useCallback(async () => {
-    if (!publicClient) return;
-
-    try {
-      setDataLoading(true);
-      
-      // Create a timeout promise for mobile networks
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Request timeout')), 15000)
-      );
-
-      // Fetch basic contract data with timeout
-      const [
-        currentStageData,
-        totalRaisedData,
-        totalSoldData
-      ] = await Promise.race([
-        Promise.all([
-          publicClient.readContract({
-            address: PRESALE_ADDRESS as `0x${string}`,
-            abi: PRESALE_ABI,
-            functionName: 'currentStage',
-          }),
-          publicClient.readContract({
-            address: PRESALE_ADDRESS as `0x${string}`,
-            abi: PRESALE_ABI,
-            functionName: 'totalRaised',
-          }),
-          publicClient.readContract({
-            address: PRESALE_ADDRESS as `0x${string}`,
-            abi: PRESALE_ABI,
-            functionName: 'getTotalTokensSold',
-          })
-        ]),
-        timeoutPromise
-      ]) as [bigint, bigint, bigint];
-
-      // Set basic data first
-      setCurrentStage(Number(currentStageData));
-      setTotalRaised(ethers.utils.formatEther(totalRaisedData.toString()));
-      setTotalTokensSold(ethers.utils.formatEther(totalSoldData.toString()));
-
-      // Fetch stage info with individual timeout and retry
-      try {
-        const stageDataPromise = publicClient.readContract({
-          address: PRESALE_ADDRESS as `0x${string}`,
-          abi: PRESALE_ABI,
-          functionName: 'getCurrentStageInfo',
-        });
-
-        const stageData = await Promise.race([
-          stageDataPromise,
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Stage info timeout')), 10000))
-        ]) as [bigint, number, bigint, bigint];
-
-        setStageInfo({
-          price: ethers.utils.formatUnits(stageData[0], 6), // Price is in 6 decimals
-          bonus: Number(stageData[1]), // This is already a regular number
-          sold: ethers.utils.formatEther(stageData[2]),
-          allocation: ethers.utils.formatEther(stageData[3])
-        });
-      } catch (error) {
-        console.error('Error fetching stage info:', error);
-        // Use fallback stage info based on current stage
-        const fallbackStage = STAGE_CONFIG.find(s => s.stage === Number(currentStageData));
-        if (fallbackStage) {
-          setStageInfo({
-            price: fallbackStage.price.toString(),
-            bonus: fallbackStage.bonus,
-            sold: '0',
-            allocation: fallbackStage.allocation.toString()
-          });
-        }
-      }
-
-      // Fetch user info if connected with timeout
-      if (address) {
-        try {
-          const userDataPromise = publicClient.readContract({
-            address: PRESALE_ADDRESS as `0x${string}`,
-            abi: PRESALE_ABI,
-            functionName: 'getUserInfo',
-            args: [address],
-          });
-
-          const userData = await Promise.race([
-            userDataPromise,
-            new Promise((_, reject) => setTimeout(() => reject(new Error('User info timeout')), 10000))
-          ]) as [bigint, bigint, bigint, bigint, string, bigint];
-
-          setUserInfo({
-            contributions: ethers.utils.formatEther(userData[0]),
-            tokensPurchased: ethers.utils.formatEther(userData[1]),
-            tokensVested: ethers.utils.formatEther(userData[2]),
-            claimable: ethers.utils.formatEther(userData[3]),
-            referrer: userData[4],
-            referralBonuses: ethers.utils.formatEther(userData[5])
-          });
-        } catch (error) {
-          console.error('Error fetching user info:', error);
-          // Set default user info to prevent UI issues
-          setUserInfo({
-            contributions: '0',
-            tokensPurchased: '0',
-            tokensVested: '0',
-            claimable: '0',
-            referrer: ethers.constants.AddressZero,
-            referralBonuses: '0'
-          });
-        }
-      }
-
-    } catch (error) {
-      console.error('Error fetching contract data:', error);
-      
-      // Set fallback data for mobile users
-      setCurrentStage(1);
-      setTotalRaised('250000');
-      setTotalTokensSold('50000000');
-      
-      const fallbackStage = STAGE_CONFIG[0];
-      setStageInfo({
-        price: fallbackStage.price.toString(),
-        bonus: fallbackStage.bonus,
-        sold: '50000000',
-        allocation: fallbackStage.allocation.toString()
-      });
-
-      if (address) {
-        setUserInfo({
-          contributions: '0',
-          tokensPurchased: '0',
-          tokensVested: '0',
-          claimable: '0',
-          referrer: ethers.constants.AddressZero,
-          referralBonuses: '0'
-        });
-      }
-
-      showNotification('info', 'Using cached data. Refresh to try loading latest data.');
-    } finally {
-      setDataLoading(false);
-    }
-  }, [publicClient, address]);
-
-  // Fetch wallet balances with improved error handling
+  // Fetch wallet balances
   const fetchBalances = useCallback(async () => {
-    if (!publicClient || !address) return;
+    if (!provider || !account) return;
 
     try {
       setBalanceLoading(true);
       
-      // Create timeout promises for mobile networks
-      const timeoutPromise = (ms: number) => new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Balance fetch timeout')), ms)
-      );
+      // Get BNB balance
+      const bnbBalance = await provider.getBalance(account);
+      setBnbBalance(ethers.utils.formatEther(bnbBalance));
 
-      // Get BNB balance with timeout
-      try {
-        const bnbBalancePromise = publicClient.getBalance({ address });
-        const bnbBalance = await Promise.race([
-          bnbBalancePromise,
-          timeoutPromise(8000)
-        ]) as bigint;
-        setBnbBalance(ethers.utils.formatEther(bnbBalance.toString()));
-      } catch (error) {
-        console.error('Error fetching BNB balance:', error);
-        // Keep previous BNB balance on error
-      }
-
-      // Get USDT balance with timeout
-      try {
-        const usdtBalancePromise = publicClient.readContract({
-          address: USDT_ADDRESS as `0x${string}`,
-          abi: ERC20_ABI,
-          functionName: 'balanceOf',
-          args: [address],
-        });
-        
-        const usdtBalance = await Promise.race([
-          usdtBalancePromise,
-          timeoutPromise(8000)
-        ]) as bigint;
-        setUsdtBalance(ethers.utils.formatUnits(usdtBalance.toString(), 18));
-      } catch (error) {
-        console.error('Error fetching USDT balance:', error);
-        // Keep previous USDT balance on error
-      }
+      // Get USDT balance
+      const usdtContract = new ethers.Contract(USDT_ADDRESS, ERC20_ABI, provider);
+      const usdtBalance = await usdtContract.balanceOf(account);
+      setUsdtBalance(ethers.utils.formatUnits(usdtBalance, 18)); // USDT on BSC has 18 decimals
     } catch (error) {
-      console.error('Error in fetchBalances:', error);
+      console.error('Error fetching balances:', error);
     } finally {
       setBalanceLoading(false);
     }
-  }, [publicClient, address]);
+  }, [provider, account]);
 
   // Utility functions
   const showNotification = (type: 'success' | 'error' | 'info', message: string) => {
@@ -510,14 +296,10 @@ function PresaleSection() {
   };
 
   const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text).then(() => {
-      setCopied(true);
-      showNotification('success', 'Copied to clipboard! 💖');
-      setTimeout(() => setCopied(false), 2000);
-    }).catch((error) => {
-      console.error('Copy failed:', error);
-      showNotification('error', 'Failed to copy to clipboard');
-    });
+    navigator.clipboard.writeText(text);
+    setCopied(true);
+    showNotification('success', 'Copied to clipboard! 💖');
+    setTimeout(() => setCopied(false), 2000);
   };
 
   const formatNumber = (num: string | number, decimals: number = 2) => {
@@ -529,7 +311,7 @@ function PresaleSection() {
       numValue = num;
     }
     
-    if (isNaN(numValue) || numValue === 0) return '0';
+    if (isNaN(numValue)) return '0';
     if (numValue >= 1000000) {
       return `${(numValue / 1000000).toFixed(decimals)}M`;
     }
@@ -635,26 +417,190 @@ function PresaleSection() {
   }, []);
 
   // Wallet connection functions
-  const connectWallet = async () => {
+  const switchToBSCMainnet = async () => {
+    if (!window.ethereum) return;
+
+    try {
+      await window.ethereum.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: BSC_MAINNET.chainId }],
+      });
+    } catch (switchError: any) {
+      if (switchError.code === 4902) {
+        try {
+          await window.ethereum.request({
+            method: 'wallet_addEthereumChain',
+            params: [BSC_MAINNET],
+          });
+        } catch (addError) {
+          console.error('Error adding BSC Mainnet:', addError);
+          throw addError;
+        }
+      } else {
+        throw switchError;
+      }
+    }
+  };
+
+  // Auto-connect to BSC Mainnet on page load
+  useEffect(() => {
+    const autoConnectToBSC = async () => {
+      if (window.ethereum) {
+        try {
+          const web3Provider = new ethers.providers.Web3Provider(window.ethereum);
+          const network = await web3Provider.getNetwork();
+
+          // If not on BSC Mainnet, auto-switch
+          if (network.chainId !== 56) {
+            await switchToBSCMainnet();
+          }
+        } catch (error) {
+          console.log('Auto-switch to BSC Mainnet failed:', error);
+        }
+      }
+    };
+
+    autoConnectToBSC();
+  }, []);
+
+  const connectWallet = async (walletType?: string) => {
+    if (!window.ethereum) {
+      showNotification('error', 'Please install MetaMask or another Web3 wallet to connect! 💔');
+      setWalletModalOpen(false);
+      return;
+    }
+
     try {
       setLoading(true);
-      await open();
-      showNotification('success', 'Welcome to SoulChain! Your wallet is connected! 💖✨');
+      await switchToBSCMainnet();
+
+      const accounts = await window.ethereum.request({
+        method: 'eth_requestAccounts'
+      });
+
+      const web3Provider = new ethers.providers.Web3Provider(window.ethereum);
+      const web3Signer = web3Provider.getSigner();
+      const network = await web3Provider.getNetwork();
+
+      if (network.chainId !== 56) {
+        showNotification('error', 'Please switch to BSC Mainnet to join the emotional revolution! 🌟');
+        setLoading(false);
+        return;
+      }
+
+      setAccount(accounts[0]);
+      setProvider(web3Provider);
+      setSigner(web3Signer);
+
+      const contract = new ethers.Contract(PRESALE_ADDRESS, PRESALE_ABI, web3Signer);
+      setPresaleContract(contract);
+
+      const walletName = walletType || detectWalletType();
+      showNotification('success', `Welcome to SoulChain! Your ${walletName} wallet is connected! 💖✨`);
+
+      const savedTxs = localStorage.getItem(`transactions_${accounts[0]}`);
+      if (savedTxs) {
+        setTransactions(JSON.parse(savedTxs));
+      }
+
+      setWalletModalOpen(false);
     } catch (error: any) {
       console.error('Connection error:', error);
-      showNotification('error', `Connection failed: ${error.message || 'Unknown error'} 💔`);
+
+      // Handle specific error cases
+      if (error.code === 4001) {
+        showNotification('error', 'Connection cancelled. Your soul awaits when you\'re ready! 💫');
+      } else if (error.code === -32002) {
+        showNotification('error', 'Please check your wallet - a connection request is already pending! 🔄');
+      } else {
+        showNotification('error', `Connection failed: ${error.message || 'Unknown error'} 💔`);
+      }
+
+      setWalletModalOpen(false);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const switchAccount = async () => {
+    if (!window.ethereum) return;
+
+    try {
+      setLoading(true);
+      await window.ethereum.request({
+        method: 'wallet_requestAccounts'
+      });
+
+      await connectWallet();
+    } catch (error: any) {
+      console.error('Switch account error:', error);
+      if (error.code === 4001) {
+        showNotification('info', 'Account switch cancelled 💫');
+      }
     } finally {
       setLoading(false);
     }
   };
 
   const disconnectWallet = () => {
-    disconnect();
+    setAccount('');
+    setProvider(null);
+    setSigner(null);
+    setPresaleContract(null);
+    setUserInfo(null);
+    setTransactions([]);
+    setBnbBalance('0');
+    setUsdtBalance('0');
     showNotification('info', 'Until we meet again, beautiful soul! 💫');
   };
 
+  // Fetch contract data
+  const fetchData = useCallback(async () => {
+    if (!presaleContract || !account) return;
+
+    try {
+      const [
+        stageData,
+        userData,
+        totalRaisedData,
+        totalSoldData,
+        currentStageData
+      ] = await Promise.all([
+        presaleContract.getCurrentStageInfo(),
+        presaleContract.getUserInfo(account),
+        presaleContract.totalRaised(),
+        presaleContract.getTotalTokensSold(),
+        presaleContract.currentStage()
+      ]);
+
+      // Handle the response properly - convert BigNumbers to strings
+      setStageInfo({
+        price: ethers.utils.formatUnits(stageData.price, 6), // Price is in 6 decimals
+        bonus: stageData.bonus, // This is already a regular number
+        sold: ethers.utils.formatEther(stageData.sold),
+        allocation: ethers.utils.formatEther(stageData.allocation)
+      });
+
+      setUserInfo({
+        contributions: ethers.utils.formatEther(userData.contributions),
+        tokensPurchased: ethers.utils.formatEther(userData.tokensPurchased),
+        tokensVested: ethers.utils.formatEther(userData.tokensVested),
+        claimable: ethers.utils.formatEther(userData.claimable),
+        referrer: userData.referrer,
+        referralBonuses: ethers.utils.formatEther(userData.referralBonuses)
+      });
+
+      setTotalRaised(ethers.utils.formatEther(totalRaisedData));
+      setTotalTokensSold(ethers.utils.formatEther(totalSoldData));
+      setCurrentStage(currentStageData); // This is already a regular number
+    } catch (error) {
+      console.error('Error fetching contract data:', error);
+      showNotification('error', 'Failed to fetch contract data. Please try again.');
+    }
+  }, [presaleContract, account]);
+
   const buyTokens = async () => {
-    if (!presaleContract || !walletClient || !buyAmount) return;
+    if (!presaleContract || !signer || !buyAmount) return;
 
     try {
       setTxLoading(true);
@@ -673,10 +619,8 @@ function PresaleSection() {
           gasLimit: gasLimit
         });
       } else {
-        const provider = new ethers.providers.Web3Provider(walletClient.transport);
-        const signer = provider.getSigner();
         const usdtContract = new ethers.Contract(USDT_ADDRESS, ERC20_ABI, signer);
-        const allowance = await usdtContract.allowance(address, PRESALE_ADDRESS);
+        const allowance = await usdtContract.allowance(account, PRESALE_ADDRESS);
         const usdtAmount = ethers.utils.parseUnits(buyAmount, 18); // USDT on BSC has 18 decimals
 
         if (allowance.lt(usdtAmount)) {
@@ -711,7 +655,7 @@ function PresaleSection() {
 
       const updatedTxs = [newTx, ...transactions];
       setTransactions(updatedTxs);
-      localStorage.setItem(`transactions_${address}`, JSON.stringify(updatedTxs));
+      localStorage.setItem(`transactions_${account}`, JSON.stringify(updatedTxs));
 
       showNotification('info', 'Your emotional investment is being processed... 💫');
       await tx.wait();
@@ -720,7 +664,7 @@ function PresaleSection() {
         t.id === newTx.id ? { ...t, status: 'completed' as const } : t
       );
       setTransactions(confirmedTxs);
-      localStorage.setItem(`transactions_${address}`, JSON.stringify(confirmedTxs));
+      localStorage.setItem(`transactions_${account}`, JSON.stringify(confirmedTxs));
 
       showNotification('success', `🎉 Welcome to the emotional revolution! You've acquired ${calculatedTokens} SOUL tokens! 💖`);
       setBuyAmount('');
@@ -746,7 +690,7 @@ function PresaleSection() {
         t.hash === (error.transaction?.hash) ? { ...t, status: 'failed' as const } : t
       );
       setTransactions(failedTxs);
-      localStorage.setItem(`transactions_${address}`, JSON.stringify(failedTxs));
+      localStorage.setItem(`transactions_${account}`, JSON.stringify(failedTxs));
     } finally {
       setTxLoading(false);
     }
@@ -782,7 +726,7 @@ function PresaleSection() {
         t.id === newTx.id ? { ...t, status: 'completed' as const } : t
       );
       setTransactions(confirmedTxs);
-      localStorage.setItem(`transactions_${address}`, JSON.stringify(confirmedTxs));
+      localStorage.setItem(`transactions_${account}`, JSON.stringify(confirmedTxs));
 
       showNotification('success', 'Your SOUL tokens have been claimed! Feel the emotional power! ✨💖');
       await fetchData();
@@ -823,43 +767,21 @@ function PresaleSection() {
       tx.type.toLowerCase().includes(searchTerm.toLowerCase())
     );
 
-  // Effect to fetch data when connected with improved mobile handling
   useEffect(() => {
-    let isMounted = true;
-    
-    if (publicClient) {
-      const loadData = async () => {
-        if (isMounted) {
-          await fetchData();
-          if (address) {
-            await fetchBalances();
-          }
-        }
-      };
-
-      loadData();
-
-      // Set up interval for periodic updates - longer interval for mobile
-      const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-      const updateInterval = isMobile ? 30000 : 15000; // 30s for mobile, 15s for desktop
-
+    if (account && presaleContract) {
+      fetchData();
+      fetchBalances();
       const interval = setInterval(() => {
-        if (isMounted && publicClient) {
-          loadData();
-        }
-      }, updateInterval);
-
-      return () => {
-        isMounted = false;
-        clearInterval(interval);
-      };
+        fetchData();
+        fetchBalances();
+      }, 10000);
+      return () => clearInterval(interval);
     }
-  }, [publicClient, address]);
+  }, [account, presaleContract, fetchData, fetchBalances]);
 
-  // Effect to fetch BNB price
   useEffect(() => {
     fetchLiveBnbPrice();
-    const interval = setInterval(fetchLiveBnbPrice, 300000); // 5 minutes
+    const interval = setInterval(fetchLiveBnbPrice, 300000);
     return () => clearInterval(interval);
   }, [fetchLiveBnbPrice]);
 
@@ -872,11 +794,93 @@ function PresaleSection() {
     return parseFloat(priceStr);
   };
 
-  // Calculate total participants (dummy data for now)
-  const totalParticipants = Math.floor(parseFloat(totalTokensSold) / 1000) || 1847;
+  // Wallet Modal Component
+  const WalletModal = () => (
+    walletModalOpen && (
+      <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div className="bg-white/10 backdrop-blur-xl border border-white/20 rounded-3xl p-6 sm:p-8 max-w-md w-full">
+          <div className="flex items-center justify-between mb-6">
+            <h3 className="text-xl font-bold text-pink-100">Connect Your Soul</h3>
+            <button
+              onClick={() => setWalletModalOpen(false)}
+              className="text-pink-300 hover:text-white transition-colors"
+            >
+              <X size={20} />
+            </button>
+          </div>
+
+          <div className="space-y-3">
+            <button
+              onClick={() => connectWallet(WALLET_TYPES.METAMASK)}
+              disabled={loading}
+              className="w-full bg-white/10 backdrop-blur-lg border-white/20 hover:border-pink-500/50 border p-4 rounded-2xl flex items-center gap-4 transition-all duration-300 hover:scale-105 disabled:opacity-50"
+            >
+              <div className="w-8 h-8 bg-orange-500 rounded-full flex items-center justify-center">
+                <Wallet size={16} className="text-white" />
+              </div>
+              <div className="text-left">
+                <div className="font-bold text-white">MetaMask</div>
+                <div className="text-xs text-pink-200">Connect using MetaMask wallet</div>
+              </div>
+            </button>
+
+            <button
+              onClick={() => connectWallet(WALLET_TYPES.TRUST_WALLET)}
+              disabled={loading}
+              className="w-full bg-white/10 backdrop-blur-lg border-white/20 hover:border-pink-500/50 border p-4 rounded-2xl flex items-center gap-4 transition-all duration-300 hover:scale-105 disabled:opacity-50"
+            >
+              <div className="w-8 h-8 bg-blue-500 rounded-full flex items-center justify-center">
+                <Shield size={16} className="text-white" />
+              </div>
+              <div className="text-left">
+                <div className="font-bold text-white">Trust Wallet</div>
+                <div className="text-xs text-pink-200">Connect using Trust Wallet</div>
+              </div>
+            </button>
+
+            <button
+              onClick={() => connectWallet(WALLET_TYPES.COINBASE)}
+              disabled={loading}
+              className="w-full bg-white/10 backdrop-blur-lg border-white/20 hover:border-pink-500/50 border p-4 rounded-2xl flex items-center gap-4 transition-all duration-300 hover:scale-105 disabled:opacity-50"
+            >
+              <div className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center">
+                <Globe size={16} className="text-white" />
+              </div>
+              <div className="text-left">
+                <div className="font-bold text-white">Coinbase Wallet</div>
+                <div className="text-xs text-pink-200">Connect using Coinbase Wallet</div>
+              </div>
+            </button>
+
+            <button
+              onClick={() => connectWallet(WALLET_TYPES.WALLETCONNECT)}
+              disabled={loading}
+              className="w-full bg-white/10 backdrop-blur-lg border-white/20 hover:border-pink-500/50 border p-4 rounded-2xl flex items-center gap-4 transition-all duration-300 hover:scale-105 disabled:opacity-50"
+            >
+              <div className="w-8 h-8 bg-purple-500 rounded-full flex items-center justify-center">
+                <Smartphone size={16} className="text-white" />
+              </div>
+              <div className="text-left">
+                <div className="font-bold text-white">WalletConnect</div>
+                <div className="text-xs text-pink-200">Connect using mobile wallet</div>
+              </div>
+            </button>
+          </div>
+
+          {loading && (
+            <div className="mt-6 text-center">
+              <div className="flex items-center justify-center gap-2 text-pink-200">
+                <Loader className="animate-spin" size={16} />
+                <span className="text-sm">Connecting your soul...</span>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  );
 
   return (
-    <section id="presale" className="section-padding bg-gradient-to-br from-gray-900 via-black to-gray-950 relative text-white">
     <div className="min-h-screen bg-gradient-to-br from-purple-900 via-pink-900 to-indigo-900 text-white transition-all duration-500 relative overflow-hidden">
       {/* Custom CSS for hiding input arrows and animations */}
       <style>{`
@@ -967,6 +971,9 @@ function PresaleSection() {
         ))}
       </div>
 
+      {/* Wallet Modal */}
+      <WalletModal />
+
       {/* Notification */}
       {notification && (
         <div className={`fixed top-4 right-4 z-50 p-4 rounded-2xl shadow-2xl backdrop-blur-lg border max-w-sm transform transition-all duration-300 ${
@@ -1022,23 +1029,22 @@ function PresaleSection() {
                     <button
                       onClick={fetchLiveBnbPrice}
                       className="text-pink-300 hover:text-white transition-colors hover:scale-110"
-                      disabled={dataLoading}
                     >
-                      <RefreshCw size={14} className={dataLoading ? 'animate-spin' : ''} />
+                      <RefreshCw size={14} />
                     </button>
                   </div>
                 </div>
 
-                {isConnected && address ? (
+                {account ? (
                   <div className="flex items-center gap-2">
                     <div className="bg-white/10 backdrop-blur-lg border-white/20 rounded-2xl px-3 py-2 border">
                       <div className="flex items-center gap-2">
                         <div className="w-3 h-3 bg-green-400 rounded-full animate-pulse"></div>
                         <span className="font-mono text-xs sm:text-sm">
-                          {formatAddress(address)}
+                          {formatAddress(account)}
                         </span>
                         <button
-                          onClick={() => copyToClipboard(address)}
+                          onClick={() => copyToClipboard(account)}
                           className="text-pink-300 hover:text-white transition-colors hover:scale-110"
                         >
                           {copied ? <CheckCircle size={14} /> : <Copy size={14} />}
@@ -1047,7 +1053,7 @@ function PresaleSection() {
                     </div>
 
                     <button
-                      onClick={() => open()}
+                      onClick={switchAccount}
                       disabled={loading}
                       className="bg-white/10 backdrop-blur-lg border-white/20 px-2 py-2 rounded-2xl hover:scale-105 transition-all duration-300 border disabled:opacity-50"
                       title="Switch Account"
@@ -1065,7 +1071,7 @@ function PresaleSection() {
                   </div>
                 ) : (
                   <button
-                    onClick={connectWallet}
+                    onClick={() => setWalletModalOpen(true)}
                     disabled={loading}
                     className="bg-gradient-to-r from-pink-500 via-purple-500 to-indigo-500 hover:from-pink-600 hover:via-purple-600 hover:to-indigo-600 px-4 py-2 sm:px-6 sm:py-3 rounded-2xl font-semibold flex items-center gap-2 transition-all duration-300 shadow-2xl shadow-pink-500/25 disabled:opacity-50 hover:scale-105 text-sm"
                   >
@@ -1088,10 +1094,10 @@ function PresaleSection() {
               </div>
             </div>
 
-            {/* Enhanced Mobile Navigation with ALL tabs including Soul Portfolio & Emotional Archive */}
-            {mobileMenuOpen && isConnected && (
+            {/* Mobile Navigation */}
+            {mobileMenuOpen && account && (
               <div className="lg:hidden mt-4 p-4 bg-white/10 backdrop-blur-lg rounded-2xl border-white/20 border">
-                <div className="grid grid-cols-2 gap-2 mb-4">
+                <div className="grid grid-cols-2 gap-2">
                   <NavItem
                     tab="home"
                     icon={<Home size={16} />}
@@ -1120,24 +1126,10 @@ function PresaleSection() {
                     isActive={activeTab === 'referrals'}
                     onClick={() => { setActiveTab('referrals'); setMobileMenuOpen(false); }}
                   />
-                  <NavItem
-                    tab="portfolio"
-                    icon={<User size={16} />}
-                    label="Soul Portfolio"
-                    isActive={activeTab === 'portfolio'}
-                    onClick={() => { setActiveTab('portfolio'); setMobileMenuOpen(false); }}
-                  />
-                  <NavItem
-                    tab="emotions"
-                    icon={<Archive size={16} />}
-                    label="Emotional Archive"
-                    isActive={activeTab === 'emotions'}
-                    onClick={() => { setActiveTab('emotions'); setMobileMenuOpen(false); }}
-                  />
                 </div>
 
                 {/* Mobile Current Emotion & BNB Price */}
-                <div className="space-y-3">
+                <div className="mt-4 space-y-3">
                   <div className="p-3 bg-white/10 backdrop-blur-lg border-white/20 rounded-2xl border">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
@@ -1160,9 +1152,8 @@ function PresaleSection() {
                       <button
                         onClick={fetchLiveBnbPrice}
                         className="text-pink-300 hover:text-white transition-colors"
-                        disabled={dataLoading}
                       >
-                        <RefreshCw size={14} className={dataLoading ? 'animate-spin' : ''} />
+                        <RefreshCw size={14} />
                       </button>
                     </div>
                   </div>
@@ -1173,7 +1164,7 @@ function PresaleSection() {
         </header>
 
         {/* Navigation Tabs - Desktop */}
-        {isConnected && (
+        {account && (
           <div className="hidden lg:block backdrop-blur-xl bg-white/5 border-b border-white/20">
             <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
               <div className="flex items-center gap-4">
@@ -1214,7 +1205,7 @@ function PresaleSection() {
                 />
                 <NavItem
                   tab="emotions"
-                  icon={<Archive size={18} />}
+                  icon={<Heart size={18} />}
                   label="Emotion Archive"
                   isActive={activeTab === 'emotions'}
                   onClick={() => setActiveTab('emotions')}
@@ -1226,7 +1217,7 @@ function PresaleSection() {
 
         {/* Main Content */}
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 sm:py-8">
-          {!isConnected ? (
+          {!account ? (
             /* Welcome Section */
             <div className="text-center py-10 sm:py-20">
               <div className="mb-8 sm:mb-12">
@@ -1304,7 +1295,7 @@ function PresaleSection() {
 
               <div className="flex flex-col sm:flex-row items-center justify-center gap-4 sm:gap-6 px-4">
                 <button
-                  onClick={connectWallet}
+                  onClick={() => setWalletModalOpen(true)}
                   disabled={loading}
                   className="w-full sm:w-auto bg-gradient-to-r from-pink-500 via-purple-500 to-indigo-500 hover:from-pink-600 hover:via-purple-600 hover:to-indigo-600 px-12 sm:px-16 py-4 sm:py-6 rounded-2xl font-bold text-lg sm:text-xl flex items-center justify-center gap-3 sm:gap-4 transition-all duration-300 shadow-2xl shadow-pink-500/25 hover:shadow-pink-500/40 disabled:opacity-50 hover:scale-105"
                 >
@@ -1361,7 +1352,7 @@ function PresaleSection() {
             <div className="space-y-6 sm:space-y-8">
               {activeTab === 'home' && (
                 <>
-                  {/* Emotional Stats Cards with improved data loading */}
+                  {/* Emotional Stats Cards */}
                   <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-6">
                     {[
                       {
@@ -1375,7 +1366,7 @@ function PresaleSection() {
                       },
                       {
                         title: 'Hearts Raised',
-                        value: dataLoading ? <Loader size={16} className="animate-spin" /> : formatNumber(totalRaised),
+                        value: formatNumber(totalRaised),
                         icon: <DollarSign size={20} />,
                         suffix: ' USD',
                         color: 'from-purple-500 to-violet-500',
@@ -1384,7 +1375,7 @@ function PresaleSection() {
                       },
                       {
                         title: 'Souls Connected',
-                        value: dataLoading ? <Loader size={16} className="animate-spin" /> : formatNumber(totalTokensSold),
+                        value: formatNumber(totalTokensSold),
                         icon: <Users size={20} />,
                         suffix: ' SOUL',
                         color: 'from-indigo-500 to-blue-500',
@@ -1392,13 +1383,13 @@ function PresaleSection() {
                         description: 'Tokens preserving emotions'
                       },
                       {
-                        title: 'Total Participants',
-                        value: dataLoading ? <Loader size={16} className="animate-spin" /> : formatNumber(totalParticipants),
+                        title: 'Current Emotion',
+                        value: currentEmotion.emotion.split(' ')[0],
                         icon: <Sparkles size={20} />,
-                        suffix: '',
+                        suffix: ` ${currentEmotion.intensity}%`,
                         color: 'from-teal-500 to-cyan-500',
                         trend: '+3.2%',
-                        description: 'Beautiful souls joined'
+                        description: 'Live emotional intensity'
                       }
                     ].map((stat, index) => (
                       <div key={index} className="bg-white/10 backdrop-blur-lg border-white/20 rounded-2xl p-4 sm:p-6 border hover:border-pink-500/50 transition-all duration-300 hover:scale-105 group">
@@ -1411,7 +1402,7 @@ function PresaleSection() {
                           </div>
                         </div>
                         <div className="text-lg sm:text-2xl font-bold mb-1 text-pink-100">
-                          {stat.value}{typeof stat.value === 'string' || typeof stat.value === 'number' ? stat.suffix : ''}
+                          {stat.value}{stat.suffix}
                         </div>
                         <div className="text-xs sm:text-sm text-pink-200 mb-1">{stat.title}</div>
                         {stat.description && (
@@ -1773,10 +1764,10 @@ function PresaleSection() {
                               <div className="text-sm text-pink-200 mb-2">Your Soul Address:</div>
                               <div className="bg-white/10 border-white/20 text-white placeholder-pink-300 rounded-2xl p-3 flex items-center justify-between border">
                                 <span className="font-mono text-xs truncate flex-1 mr-2">
-                                  {address}
+                                  {account}
                                 </span>
                                 <button
-                                  onClick={() => copyToClipboard(address!)}
+                                  onClick={() => copyToClipboard(account)}
                                   className="text-pink-400 hover:text-pink-300 transition-colors hover:scale-110"
                                 >
                                   {copied ? <CheckCircle size={16} /> : <Copy size={16} />}
@@ -1972,7 +1963,7 @@ function PresaleSection() {
                           const url = URL.createObjectURL(blob);
                           const a = document.createElement('a');
                           a.href = url;
-                          a.download = `soulchain-journey-${address?.slice(0, 6)}.json`;
+                          a.download = `soulchain-journey-${account.slice(0, 6)}.json`;
                           a.click();
                         }}
                         className="bg-white/10 backdrop-blur-lg border-white/20 px-4 py-2 rounded-2xl flex items-center gap-2 hover:scale-105 transition-all duration-300 border text-sm hover:border-pink-500/50"
@@ -2166,10 +2157,10 @@ function PresaleSection() {
                     <div className="mb-6">
                       <div className="bg-white/10 border-white/20 text-white placeholder-pink-300 rounded-2xl p-3 sm:p-4 flex items-center justify-between border">
                         <span className="font-mono text-xs sm:text-sm truncate flex-1 mr-4">
-                          {`https://soulchain.love/presale?soul=${address}`}
+                          {`https://soulchain.love/presale?soul=${account}`}
                         </span>
                         <button
-                          onClick={() => copyToClipboard(`https://soulchain.love/presale?soul=${address}`)}
+                          onClick={() => copyToClipboard(`https://soulchain.love/presale?soul=${account}`)}
                           className="bg-gradient-to-r from-pink-500 via-purple-500 to-indigo-500 hover:from-pink-600 hover:via-purple-600 hover:to-indigo-600 px-4 sm:px-6 py-2 rounded-xl flex items-center gap-2 hover:scale-105 transition-all duration-300 text-sm"
                         >
                           {copied ? <CheckCircle size={14} /> : <Copy size={14} />}
@@ -2465,7 +2456,6 @@ function PresaleSection() {
         </main>
       </div>
     </div>
-    </section>
   );
 }
 
